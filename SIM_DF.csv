@@ -1,0 +1,156 @@
+﻿saludo,SALUDO
+marca,SALUDO
+motivo de llamada,SALUDO
+descripción de la cobertura,OFRECIMIENTO
+confirmacion,MAC
+precio,PRECIO
+titularidad,CONFIRMACION DE DATOS
+términos de llamada,TERMINOS LEGALES
+despedida,DESPEDIDA
+no permitida, 
+recomendación,OFRECIMIENTO
+descripcion de la cobertura,OFRECIMIENTO
+introduccion,SALUDO
+identificación,CONFIRMACION DE DATOS
+descripción,OFRECIMIENTO
+número eventos,OFRECIMIENTO
+validación,CONFIRMACION DE DATOS
+nombre,SALUDO
+términos,TERMINOS LEGALES
+introducción,SALUDO
+líneas de atención,TERMINOS LEGALES
+identificación asesor,SALUDO
+identificación compañía,SALUDO
+seguridad de la llamada,SALUDO
+descripción del producto,OFRECIMIENTO
+solicitud datos titular,CONFIRMACION DE DATOS
+pregunta contratación,MAC
+envío de condicionado,OFRECIMIENTO
+cierre,MAC
+lineas de atención,TERMINOS LEGALES
+Presentación,SALUDO
+motivo,SALUDO
+Descripcion,OFRECIMIENTO
+Perfilamiento,PERFILAMIENTO
+Cierre,MAC
+nombre de producto,OFRECIMIENTO
+salida,DESPEDIDA
+presentacion,SALUDO
+empresa,SALUDO
+datos cliente,CONFIRMACION DE DATOS
+producto,OFRECIMIENTO
+legalidad,TERMINOS LEGALES
+contacto,TERMINOS LEGALES
+finalizacion,DESPEDIDA
+términos de la llamada,TERMINOS LEGALES
+asistencias al hogar,OFRECIMIENTO
+preguntas vivienda,PERFILAMIENTO
+requisito asegurabilidad,OFRECIMIENTO
+retracto,TERMINOS LEGALES
+exclusiones,OFRECIMIENTO
+cob inhabitabilidad vivienda,OFRECIMIENTO
+requisito inhabitabilidad,OFRECIMIENTO
+asistencias al hogar dos,OFRECIMIENTO
+termino anticipado,TERMINOS LEGALES
+renovación automatica,PRECIO
+terminos legales,TERMINOS LEGALES
+pol cmf,OFRECIMIENTO
+código contratación,TERMINOS LEGALES
+envío de póliza,OFRECIMIENTO
+dudas o preguntas,PERFILAMIENTO
+datos de la materia asegurada,PERFILAMIENTO
+ubicación,PERFILAMIENTO
+contratar,MAC
+datos personales,CONFIRMACION DE DATOS
+ley de retracto,TERMINOS LEGALES
+cobertura,OFRECIMIENTO
+linea de atencion,TERMINOS LEGALES
+terminos,TERMINOS LEGALES
+INTRODUCCIÓN - SALUDO,SALUDO
+ESPERA,
+CONCLUSIÓN - INMEDIATO,
+CONCLUSIÓN - PROGRAMADOS,
+CONCLUSIÓN - NO CUENTA CON LA ASISTENCIA,OFRECIMIENTO
+pregunta refuerzo,MAC
+No permitida, 
+descripción cobertura,OFRECIMIENTO
+perfilamiento,PERFILAMIENTO
+envío de información,OFRECIMIENTO
+nombre cobertura,OFRECIMIENTO
+términos acuerdo,TERMINOS LEGALES
+términos legales,TERMINOS LEGALES
+envío de info,OFRECIMIENTO
+recomendacion,OFRECIMIENTO
+número de eventos,OFRECIMIENTO
+seguridad,PERFILAMIENTO
+recurrencia,PRECIO
+autovalidación,CONFIRMACION DE DATOS
+términos legales aceptación,TERMINOS LEGALES
+pregunta de servicio,PERFILAMIENTO
+entidad,SALUDO
+nombre de cobertura,OFRECIMIENTO
+nombre de la cobertura,OFRECIMIENTO
+no permitidas, 
+medio de pago,PRECIO
+seguridad de llamada,SALUDO
+nombres de la cobertura,OFRECIMIENTO
+precierre,MAC
+no permitida MAC, 
+sondeo,PERFILAMIENTO
+descripción ,OFRECIMIENTO
+pre cierre,MAC
+términos llamada,TERMINOS LEGALES
+validación cédula,CONFIRMACION DE DATOS
+entidades,SALUDO
+ley habeas data,TERMINOS LEGALES
+aceptación habeas data,TERMINOS LEGALES
+bienvenida,DESPEDIDA
+firma de documento,CONFIRMACION DE DATOS
+presentación de servicio,OFRECIMIENTO
+venta,OFRECIMIENTO
+seguro de vida,OFRECIMIENTO
+validación info cliente,CONFIRMACION DE DATOS
+validación de datos,CONFIRMACION DE DATOS
+nombre de auditor,CONFIRMACION DE DATOS
+autorización,MAC
+validación de identidad,CONFIRMACION DE DATOS
+envio de información,OFRECIMIENTO
+identificacion asesor,SALUDO
+lineas,TERMINOS LEGALES
+Autoriza de documento,CONFIRMACION DE DATOS
+identificación del asesor,SALUDO
+aviso de privacidad,TERMINOS LEGALES
+guion de cierre dos,DESPEDIDA
+beneficiarios,OFRECIMIENTO
+folio,OFRECIMIENTO
+identificación entidad,SALUDO
+transferencia de datos,TERMINOS LEGALES
+guion de cierre uno,DESPEDIDA
+guion de cierre,DESPEDIDA
+claridad de la info,OFRECIMIENTO
+motivo de la llamada,SALUDO
+canales de atención,TERMINOS LEGALES
+envió información,OFRECIMIENTO
+cierre de validación,CONFIRMACION DE DATOS
+calidad de la llamada,SALUDO
+inicio de validación,CONFIRMACION DE DATOS
+identificación de entidad,SALUDO
+presentación de producto,OFRECIMIENTO
+claridad de info,OFRECIMIENTO
+cortesía,OFRECIMIENTO
+domiciliación de documentos,CONFIRMACION DE DATOS
+legales,TERMINOS LEGALES
+prestadores de servicio,TERMINOS LEGALES
+validación titularidad,CONFIRMACION DE DATOS
+envío portafolios,OFRECIMIENTO
+cumplimiento de ley,TERMINOS LEGALES
+identificación de marca,SALUDO
+descripciÃ³n de producto,OFRECIMIENTO
+Identificación de compañias,PERFILAMIENTO
+Responsabilidad de pago,PRECIO
+Introducción,SALUDO
+Metodo y forma de pago,PRECIO
+Validación de datos,CONFIRMACION DE DATOS
+Términos legales,TERMINOS LEGALES
+prorrateo,
+confirmación,MAC
