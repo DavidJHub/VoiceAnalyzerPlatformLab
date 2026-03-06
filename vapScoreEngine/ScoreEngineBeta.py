@@ -2,7 +2,6 @@ import glob
 import json
 import os
 from difflib import SequenceMatcher
-from sklearn.preprocessing import QuantileTransformer
 
 import pandas as pd
 from scipy.ndimage import gaussian_filter1d
@@ -16,11 +15,14 @@ from setup.MatrixSetup import remove_connectors
 from utils.VapFunctions import measureDbAplitude, measure_speed_classification
 from utils.VapUtils import jsonDecompose, get_data_from_name, jsonDecomposeSentencesHighlight, jsonTranscriptionToCsv, getTranscriptParagraphsJsonHighlights
 
-import pandas as pd
 import numpy as np
 
 from segmentationModel.textPostprocessing import reconstruirDialogos, process_directory_mac_price_def
 from vapScoreEngine.dfUtils import calculate_confidence_scores_per_topic, df_getWordRate, generateConvDataframe
+from vapScoreEngine.schema import (
+    CallRecord, DIMENSION_WEIGHTS, REQUIRED_COMPLIANCE_TOPICS,
+    CANONICAL_SCRIPT_ORDER, SCORE_VERSION,
+)
 
 
 
@@ -344,175 +346,420 @@ def calificarLikelyhoodConMatriz(df, input_keywords, stride=1):
     return df
 
 
-def score_camp(campaign_directory,campaign_id,TMO,topics_combined_df):
+def _compute_mac_flow(row: pd.Series) -> dict:
+    """
+    Determina el resultado del flujo de Pregunta de Activación (MAC) para una
+    llamada a partir de sus columnas agregadas.
+
+    Reglas:
+      - Si mac_times_said == 0                         → NO_MAC
+      - Si best_mac_likelihood >= 0.88 y no hay mac_r  → VENTA_CONFIRMADA
+      - Si best_mac_likelihood in [0.80, 0.88) o hay
+        mac_r y mac_r_detected                         → VENTA_REFUERZO
+      - En cualquier otro caso                         → NO_CONFIRMADA
+
+    Retorna un dict con mac_flow_outcome, mac_r_triggered, mac_r_effective.
+    """
+    mac_count  = int(row.get('mac_times_said', 0) or 0)
+    mac_like   = float(row.get('best_mac_likelihood', 0.0) or 0.0)
+    mac_r_det  = bool(row.get('mac_r_detected', False) or row.get('mac_r', 0))
+
+    if mac_count == 0:
+        return {"mac_flow_outcome": "NO_MAC", "mac_r_triggered": False, "mac_r_effective": False}
+
+    if mac_like >= 0.88 and not mac_r_det:
+        return {"mac_flow_outcome": "VENTA_CONFIRMADA", "mac_r_triggered": False, "mac_r_effective": False}
+
+    if mac_r_det:
+        return {"mac_flow_outcome": "VENTA_REFUERZO", "mac_r_triggered": True, "mac_r_effective": True}
+
+    if mac_like >= 0.80:
+        # Respuesta ambigua y no se aplicó refuerzo → necesitaba refuerzo pero no se hizo
+        return {"mac_flow_outcome": "NO_CONFIRMADA", "mac_r_triggered": True, "mac_r_effective": False}
+
+    return {"mac_flow_outcome": "NO_CONFIRMADA", "mac_r_triggered": False, "mac_r_effective": False}
+
+
+def _score_d1_mac_venta(row: pd.Series) -> float:
+    """
+    D1 — Pregunta de Activación + confirmación de venta (0–10).
+
+    Componentes:
+      - Presencia del MAC              (2.0 pts)
+      - Calidad del fragmento MAC      (3.0 pts × best_mac_likelihood)
+      - Resultado del flujo MAC        (3.0 pts: CONFIRMADA=3, REFUERZO=2, NO_CONF=0.5, NO_MAC=0)
+      - Precio detectado y likelihood  (2.0 pts × best_price_likelihood)
+    """
+    mac_count  = int(row.get('mac_times_said', 0) or 0)
+    mac_like   = float(row.get('best_mac_likelihood', 0.0) or 0.0)
+    price_like = float(row.get('best_price_likelihood', 0.0) or 0.0)
+    outcome    = str(row.get('mac_flow_outcome', 'NO_MAC'))
+
+    score = 0.0
+    if mac_count > 0:
+        score += 2.0
+
+    score += 3.0 * mac_like
+
+    outcome_pts = {"VENTA_CONFIRMADA": 3.0, "VENTA_REFUERZO": 2.0,
+                   "NO_CONFIRMADA": 0.5, "NO_MAC": 0.0}
+    score += outcome_pts.get(outcome, 0.0)
+
+    score += 2.0 * min(price_like, 1.0)
+
+    return round(min(score, 10.0), 4)
+
+
+def _score_d2_compliance(row: pd.Series) -> float:
+    """
+    D2 — Completitud de momentos legales y regulatorios (0–10).
+
+    Cada momento de REQUIRED_COMPLIANCE_TOPICS vale igual.
+    Bonus de 1 punto si el agente también mencionó confirmación de monitoreo.
+    """
+    flag_cols = {
+        "TERMINOS LEGALES":       "terms_detected",
+        "TRATAMIENTO DATOS":      "tratamiento_datos_detected",
+        "LEY RETRACTO":           "ley_retracto_detected",
+        "CONFIRMACION MONITOREO": "confirmacion_monitoreo_detected",
+        "PRECIO":                 "precio_detected",
+        "CONFIRMACION DATOS":     "confirmacion_datos_detected",
+    }
+    n_required = len(flag_cols)
+    count = sum(1 for col in flag_cols.values() if bool(row.get(col, False)))
+    base  = (count / n_required) * 9.0
+
+    # Bonus: confirmación de monitoreo (ya incluida arriba, pero si excede la
+    # base le damos un punto extra de calidad total hasta 10)
+    bonus = 1.0 if bool(row.get('confirmacion_monitoreo_detected', False)) else 0.0
+    return round(min(base + bonus, 10.0), 4)
+
+
+def _score_d3_script(row: pd.Series) -> float:
+    """
+    D3 — Adherencia al guión y estructura conversacional (0–10).
+
+    - script_completeness (fracción de tópicos cubiertos) → 6 pts
+    - topic_order_score   (Kendall-tau vs orden canónico)  → 4 pts
+    """
+    completeness = float(row.get('script_completeness', 0.0) or 0.0)
+    order_score  = float(row.get('topic_order_score',   0.0) or 0.0)
+    return round(min(completeness * 6.0 + order_score * 4.0, 10.0), 4)
+
+
+def _score_d4_engagement(row: pd.Series) -> float:
+    """
+    D4 — Calidad comunicativa del agente (0–10).
+
+    - Participación óptima del agente: 55–70 % → 4 pts, se penaliza si > 0.85
+    - WPM del agente: óptimo 120–160 → 3 pts
+    - Turn count (interacción): más turnos = mejor → 2 pts (cap en 20 turnos)
+    - Preguntas del cliente detectadas → 1 pt (cap en 5)
+    """
+    participation = float(row.get('agent_participation', 0.0) or 0.0)
+    wpm           = float(row.get('agent_wpm', 140.0) or 140.0)
+    turns         = int(row.get('turn_count', 0) or 0)
+    client_q      = int(row.get('client_question_count', 0) or 0)
+
+    # Participación: óptimo 0.55–0.70; penaliza si > 0.85 (agente habla demasiado)
+    if 0.55 <= participation <= 0.70:
+        part_pts = 4.0
+    elif participation > 0.85:
+        part_pts = max(0.0, 4.0 - (participation - 0.85) * 20)
+    else:
+        part_pts = 4.0 * (participation / 0.55)
+
+    # WPM: óptimo 120–160; penaliza por velocidad excesiva (> 180) o muy lenta (< 80)
+    if 120 <= wpm <= 160:
+        wpm_pts = 3.0
+    elif wpm > 160:
+        wpm_pts = max(0.0, 3.0 - (wpm - 160) / 40)
+    else:
+        wpm_pts = max(0.0, 3.0 * (wpm / 120))
+
+    turn_pts     = min(turns / 20, 1.0) * 2.0
+    client_q_pts = min(client_q / 5, 1.0) * 1.0
+
+    return round(min(part_pts + wpm_pts + turn_pts + client_q_pts, 10.0), 4)
+
+
+def _score_d5_audio(row: pd.Series) -> float:
+    """
+    D5 — Calidad técnica del audio / transcripción ASR (0–10).
+
+    - confidence_score  → 7 pts (confianza media ASR, 0–1)
+    - silence_ratio     → 3 pts (menos silencio = mejor; 0 silencio = 3 pts)
+    """
+    conf    = float(row.get('confidence_score', 0.0) or 0.0)
+    silence = float(row.get('silence_ratio', 0.0) or 0.0)
+    silence_pts = max(0.0, 3.0 * (1.0 - silence))
+    return round(min(conf * 7.0 + silence_pts, 10.0), 4)
+
+
+def _enrich_with_compliance_flags(mat: pd.DataFrame,
+                                   values_per_topic: pd.DataFrame) -> pd.DataFrame:
+    """
+    Agrega a MAT los flags binarios de presencia por cada tópico SUBTAG,
+    la completitud de compliance y los indicadores del flujo MAC.
+    """
+    topic_flags = {
+        'saludo_detected':                  ['SALUDO'],
+        'perfilamiento_detected':           ['PERFILAMIENTO'],
+        'producto_detected':                ['PRODUCTO', 'OFERTA COMERCIAL'],
+        'conformidad_detected':             ['CONFORMIDAD'],
+        'confirmacion_monitoreo_detected':  ['CONFIRMACION MONITOREO'],
+        'tratamiento_datos_detected':       ['TRATAMIENTO DATOS'],
+        'ley_retracto_detected':            ['LEY RETRACTO'],
+        'mac_detected':                     ['MAC', 'MAC_DEF'],
+        'mac_r_detected':                   ['MAC REFUERZO'],
+        'precio_detected':                  ['PRECIO', 'PRECIO_DEF'],
+        'confirmacion_datos_detected':      ['CONFIRMACION DATOS'],
+        'conformidad_atencion_detected':    ['ATENCION'],
+        'despedida_detected':               ['DESPEDIDA'],
+    }
+
+    for flag_col, labels in topic_flags.items():
+        present_files = values_per_topic[
+            values_per_topic['final_label'].isin(labels)
+        ]['file_name'].unique()
+        mat[flag_col] = mat['file_name'].isin(present_files)
+
+    # Aliases de compatibilidad legacy
+    mat['terms_detected']  = mat['terms_detected'] if 'terms_detected' in mat.columns else mat['tratamiento_datos_detected']
+    mat['mvd_detected']    = mat['confirmacion_datos_detected']
+
+    # Compliance completeness
+    req_flags = [
+        'terms_detected', 'tratamiento_datos_detected', 'ley_retracto_detected',
+        'confirmacion_monitoreo_detected', 'precio_detected', 'confirmacion_datos_detected',
+    ]
+    mat['compliance_moment_count'] = mat[req_flags].sum(axis=1)
+    mat['compliance_completeness'] = mat['compliance_moment_count'] / len(REQUIRED_COMPLIANCE_TOPICS)
+
+    return mat
+
+
+def score_camp(campaign_directory, campaign_id, TMO, topics_combined_df):
+    """
+    Pipeline principal de calificación de llamadas — modelo MDCL v3.
+
+    Parámetros
+    ----------
+    campaign_directory : str
+        Directorio raíz de la campaña (con trailing slash).
+    campaign_id : str
+        Identificador de la campaña (se usa para construir subdirectorios).
+    TMO : float
+        Tiempo medio objetivo de la llamada en minutos (referencia de campaña).
+    topics_combined_df : pd.DataFrame
+        DataFrame de la matriz de calificación con columnas 'name' y 'cluster'.
+
+    Retorna
+    -------
+    tuple(MAT_CALLS, statistics, MAT_complete_topics, NOPERM,
+          topics_stats_convs_scores, values_per_topic_for_all_convs)
+    """
     keywords_df = topics_combined_df
     PERM, NOPERM = list_y_n_words(keywords_df)
+
     print("Procesando conversaciones y generando caché...")
-    routeRawCsvTranscripts = campaign_directory  + campaign_id.replace('/','') + '_RAW'
-    routeRawCsvGraded  = campaign_directory  + campaign_id.replace('/','')  + '_PROCESSED'
-    routeRawCsvRebuilt = campaign_directory + campaign_id.replace('/', '') + '_RECONS'
-    scores = process_directory_conversations_with_memory(campaign_directory,
-                                                         routeRawCsvTranscripts,
-                                                         routeRawCsvGraded,
-                                                         routeRawCsvRebuilt,
-                                                         PERM, NOPERM)
-    print("TOTAL DE LLAMADAS A CALIFICAR: "+ str(len(scores)))
-    statistics = calculate_general_statistics([scores[i][1] for i in range(len(scores))],[scores[i][2] for i in range(len(scores))])
+    routeRawCsvTranscripts = campaign_directory + campaign_id.replace('/', '') + '_RAW'
+    routeRawCsvGraded      = campaign_directory + campaign_id.replace('/', '') + '_PROCESSED'
+    routeRawCsvRebuilt     = campaign_directory + campaign_id.replace('/', '') + '_RECONS'
+
+    scores = process_directory_conversations_with_memory(
+        campaign_directory, routeRawCsvTranscripts,
+        routeRawCsvGraded, routeRawCsvRebuilt, PERM, NOPERM,
+    )
+    print(f"TOTAL DE LLAMADAS A CALIFICAR: {len(scores)}")
+
+    statistics = calculate_general_statistics(
+        [scores[i][1] for i in range(len(scores))],
+        [scores[i][2] for i in range(len(scores))],
+    )
     statistics.to_excel(campaign_directory + 'misc/statistics_pre.xlsx')
+
     MAT_a = get_all_transcripts(campaign_directory)
     MAT_M = get_all_transcripts_memory(routeRawCsvRebuilt + '/memory/')
+    MAT   = pd.concat([MAT_a, MAT_M], axis=0, ignore_index=True)
+    MAT.to_excel(campaign_directory + "misc/MAT.xlsx")
 
-    MAT = pd.concat([MAT_a, MAT_M], axis=0)
-    MAT.to_excel(campaign_directory + "misc/" + 'MAT.xlsx')
-    
-
-    ####### NEEDED MAC/PRICE ############
-
-    ALLOWED_MACS = keywords_df[keywords_df['cluster']=='MAC']['name'].tolist()
+    # ── Extraer keywords MAC y PRECIO de la matriz ───────────────────────────
+    ALLOWED_MACS   = keywords_df[keywords_df['cluster'] == 'MAC']['name'].tolist()
     ALLOWED_PRICES = keywords_df[keywords_df['cluster'] == 'PRECIO']['name'].tolist()
+    print(f"MACs permitidos: {ALLOWED_MACS}")
+    print(f"Precios permitidos: {ALLOWED_PRICES}")
 
-    print('MACS PERMITIDOS: ' + str(ALLOWED_MACS))
-    print('PRECIOS PERMITIDOS: ' + str(ALLOWED_PRICES))
+    MAT = df_getWordRate(MAT, keywords_df)
 
-    MAT=df_getWordRate(MAT,keywords_df)
-
-    ## WORDS FACTOR
-    MAT['score'] = np.sqrt(np.abs(
-        (MAT['count_must_have'] - MAT['count_forbidden']) / (len(PERM) + len(NOPERM)))) * 10
-
-    perfect_Score=np.sqrt(np.abs((100 + 0) / (200))) * 10
-    ## TMO FACTOR
-    MAT['score'] = np.maximum(0, MAT['score'] + MAT['score']*(MAT['TMO']  - np.mean(MAT['TMO']) ** (2)) / (
-                np.mean(MAT['TMO']) ** (2)))
-    perfect_Score=perfect_Score+1/2
+    # ── Metadatos del nombre de archivo ──────────────────────────────────────
     try:
-        MAT[['DATE_TIME','LEAD_ID', 'EPOCH','AGENT_ID', 'CLIENT_ID']] = MAT['file_name'].apply(lambda x: pd.Series(get_data_from_name(x)))
-    except:
-        MAT[['DATE_TIME','LEAD_ID','AGENT_ID', 'CLIENT_ID']] = MAT['file_name'].apply(lambda x: pd.Series(get_data_from_name(x)))
-    MAT.to_excel(campaign_directory + "misc/" + 'MAT_BEFORE_MACS.xlsx')
-    print("TOTAL DE LLAMADAS CALIFICADAS: " + str(len(scores)))
-    values_per_topic_for_all_convs = [scores[i][1] for i in range(len(scores))]
-    values_per_topic_for_all_convs = pd.concat(values_per_topic_for_all_convs, ignore_index=True)
-    topics_transcripts_convers = [scores[i][0] for i in range(len(scores))]
-    topics_transcripts_convers = pd.concat(topics_transcripts_convers, ignore_index=False)
-    topics_transcripts_convers.to_excel(campaign_directory + "misc/" + 'topics_transcripts_convers.xlsx')
-    values_per_topic_for_all_convs['velocity_classification'] = values_per_topic_for_all_convs['topic_words_p_m'].apply(measure_speed_classification)
-    values_per_topic_for_all_convs.to_excel(campaign_directory + "misc/" + 'values_per_topic_for_all_convs.xlsx')
-    values_per_topic_for_all_convs['mean_transcript_confidence'].fillna(0)
-    values_per_topic_for_all_convs['mean_mac_transcript_confidence'].fillna(0)
-    values_per_topic_for_all_convs['mean_price_transcript_confidence'].fillna(0)
-    values_per_topic_for_all_convs['noauditable_transcript']=values_per_topic_for_all_convs['mean_transcript_confidence'].apply(
-        lambda x: 0 if x > 0.9 else 1
+        MAT[['DATE_TIME', 'LEAD_ID', 'EPOCH', 'AGENT_ID', 'CLIENT_ID']] = \
+            MAT['file_name'].apply(lambda x: pd.Series(get_data_from_name(x)))
+    except Exception:
+        MAT[['DATE_TIME', 'LEAD_ID', 'AGENT_ID', 'CLIENT_ID']] = \
+            MAT['file_name'].apply(lambda x: pd.Series(get_data_from_name(x)))
+
+    MAT.to_excel(campaign_directory + "misc/MAT_BEFORE_MACS.xlsx")
+
+    # ── Construir DataFrame de tópicos ───────────────────────────────────────
+    values_per_topic_for_all_convs = pd.concat(
+        [scores[i][1] for i in range(len(scores))], ignore_index=True,
     )
-
-    values_per_topic_for_all_convs['noauditable_transcript_mac']=values_per_topic_for_all_convs['mean_mac_transcript_confidence'].apply(
-        lambda x: 0 if x > 0.9 else 1
+    topics_transcripts_convers = pd.concat(
+        [scores[i][0] for i in range(len(scores))], ignore_index=False,
     )
+    topics_transcripts_convers.to_excel(campaign_directory + "misc/topics_transcripts_convers.xlsx")
 
-    values_per_topic_for_all_convs['noauditable_transcript_price']=values_per_topic_for_all_convs['mean_price_transcript_confidence'].apply(
-        lambda x: 0 if x > 0.9 else 1
+    values_per_topic_for_all_convs['velocity_classification'] = \
+        values_per_topic_for_all_convs['topic_words_p_m'].apply(measure_speed_classification)
+    values_per_topic_for_all_convs.to_excel(campaign_directory + "misc/values_per_topic_for_all_convs.xlsx")
+
+    for conf_col in ('mean_transcript_confidence', 'mean_mac_transcript_confidence',
+                     'mean_price_transcript_confidence'):
+        if conf_col in values_per_topic_for_all_convs.columns:
+            values_per_topic_for_all_convs[conf_col] = \
+                values_per_topic_for_all_convs[conf_col].fillna(0)
+
+    values_per_topic_for_all_convs['noauditable_transcript'] = \
+        (values_per_topic_for_all_convs['mean_transcript_confidence'] <= 0.9).astype(int)
+
+    # ── Filtrar fragmentos MAC y PRECIO ──────────────────────────────────────
+    AllCallMacs   = values_per_topic_for_all_convs[
+        values_per_topic_for_all_convs['final_label'].isin(['MAC_DEF', 'MAC'])
+    ].copy()
+    AllCallPrices = values_per_topic_for_all_convs[
+        values_per_topic_for_all_convs['final_label'].isin(['PRECIO_DEF', 'PRECIO'])
+    ].copy()
+    AllCallMVDs     = values_per_topic_for_all_convs[values_per_topic_for_all_convs['mvd'] > 0]
+    AllCallTERMS    = values_per_topic_for_all_convs[values_per_topic_for_all_convs['terms'] > 0]
+    AllCallMacR     = values_per_topic_for_all_convs[values_per_topic_for_all_convs['mac_r'] > 0]
+    AllCallIgsComps = values_per_topic_for_all_convs[values_per_topic_for_all_convs['igs_comp'] > 0]
+
+    for label, df_sub in [('TRUE_MVDs', AllCallMVDs), ('TRUE_TERMS', AllCallTERMS),
+                           ('TRUE_MAC_R', AllCallMacR), ('TRUE_IGS_COMPS', AllCallIgsComps),
+                           ('TRUE_MACS', AllCallMacs), ('TRUE_PRICES', AllCallPrices)]:
+        df_sub.to_excel(campaign_directory + f"misc/{label}.xlsx")
+
+    print(f"MACs detectados: {len(AllCallMacs)} | Precios detectados: {len(AllCallPrices)}")
+
+    # ── Likelihood de MAC y PRECIO ────────────────────────────────────────────
+    AllCallMacs   = calificarLikelyhoodConMatriz(AllCallMacs,   ALLOWED_MACS,   1)
+    AllCallPrices = calificarLikelyhoodConMatriz(AllCallPrices, ALLOWED_PRICES, 1)
+    AllCallMacs.to_excel(campaign_directory + "misc/TRUE_MACS_graded.xlsx")
+    AllCallPrices.to_excel(campaign_directory + "misc/TRUE_PRICES_graded.xlsx")
+
+    # ── Confianza media por llamada ───────────────────────────────────────────
+    topics_stats_convs_scores = (
+        values_per_topic_for_all_convs
+        .groupby('file_name', as_index=False)
+        .agg(topic_mean_conf=('topic_mean_conf', 'mean'))
     )
-
-    AllCallMacs = values_per_topic_for_all_convs[values_per_topic_for_all_convs['final_label'].isin(['MAC_DEF', 'MAC'])]
-    AllCallPrices = values_per_topic_for_all_convs[values_per_topic_for_all_convs['final_label'].isin(['PRECIO_DEF', 'PRECIO'])]
-
-    AllCallMVDs = values_per_topic_for_all_convs[values_per_topic_for_all_convs['mvd']>0]
-    AllCallMVDs.to_excel(campaign_directory + "misc/" + 'TRUE_MVDs.xlsx')
-    AllCallTERMS = values_per_topic_for_all_convs[values_per_topic_for_all_convs['terms']>0]
-    AllCallMVDs.to_excel(campaign_directory + "misc/" + 'TRUE_TERMS.xlsx')
-    AllCallMacR = values_per_topic_for_all_convs[values_per_topic_for_all_convs['mac_r']>0]
-    AllCallMacR.to_excel(campaign_directory + "misc/" + 'TRUE_MAC_R.xlsx')
-    AllCallIgsComps = values_per_topic_for_all_convs[values_per_topic_for_all_convs['igs_comp']>0]
-    AllCallIgsComps.to_excel(campaign_directory + "misc/" + 'TRUE_IGS_COMPS.xlsx')
-
-    print('Número de MACs detectados: ' + str(len(AllCallMacs)))
-    print('Número de PRECIOS detectados: ' + str(len(AllCallPrices)))
-
-    AllCallMacs.to_excel(campaign_directory + "misc/" + 'TRUE_MACS.xlsx')
-    AllCallPrices.to_excel(campaign_directory + "misc/" + 'TRUE_PRICES.xlsx')
-
-    AllCallMacs=calificarLikelyhoodConMatriz(AllCallMacs,ALLOWED_MACS, 1)
-    AllCallPrices = calificarLikelyhoodConMatriz(AllCallPrices, ALLOWED_PRICES,  1)
-
-    AllCallMacs.to_excel(campaign_directory + "misc/" + 'TRUE_MACS_graded.xlsx')
-    AllCallPrices.to_excel(campaign_directory + "misc/" + 'TRUE_PRICES_graded.xlsx')
-
-    topics_stats_convs_scores = values_per_topic_for_all_convs.groupby('file_name', as_index=False).agg({
-        'topic_mean_conf': 'mean'
-    }).reset_index()
-
-    topics_stats_convs_scores.to_excel(campaign_directory + "misc/" + 'topics_stats_convs_scores.xlsx')
-
-    # topics_stats_convs_scores      - > MEDIA DE CONFIDENCE DE TODA LA CONVERSACIÓN
-    # values_per_topic_for_all_convs - > MEDIA DE CONFIDENCE DE TODA LA CONVERSACIÓN POR TEMA
-    # values_per_topic_for_all_convs - > CONFIANZA DE TODOS LOS FRAGMENTOS DE CONVERSACIÓN DE TODAS LAS CONVERSACIONES
-
-    # OPERAR LOS PUNTAJES CON LA MEDIA DE CONFIANZA DE LOS TEMAS (MAS ALTO = MAS CLARA LA CONVERSACIÓN)
+    topics_stats_convs_scores.to_excel(campaign_directory + "misc/topics_stats_convs_scores.xlsx")
 
     conf_map = topics_stats_convs_scores.set_index('file_name')['topic_mean_conf']
-    MAT['score'] = MAT.apply(lambda row: row['score'] * conf_map[row['file_name']] if row['file_name'] in conf_map else row['score'], axis=1)
-    MAT.to_excel(campaign_directory + "misc/" + 'MAT_complete.xlsx')
-    perfect_Score = perfect_Score*0.9
 
-    AllCallMacs['times_said'] = AllCallMacs.groupby('file_name')['file_name'].transform('count')
+    # ── Seleccionar el mejor fragmento MAC y PRECIO por llamada ──────────────
+    AllCallMacs['times_said']   = AllCallMacs.groupby('file_name')['file_name'].transform('count')
     AllCallPrices['times_said'] = AllCallPrices.groupby('file_name')['file_name'].transform('count')
-    AllCallMacsMarked=AllCallMacs.loc[AllCallMacs.groupby('file_name')['best_mac_likelihood'].idxmax()]
-    AllCallPricesMarked=AllCallPrices.loc[AllCallPrices.groupby('file_name')['best_mac_likelihood'].idxmax()]
-    tolerance=0.85
-    AllCallMacsMarked['warn'] = AllCallMacsMarked['best_mac_likelihood'].apply(lambda x: x < tolerance)
-    AllCallPricesMarked['warn'] = AllCallPricesMarked['best_mac_likelihood'].apply(lambda x: x < tolerance)
-    MAT_w_macs = pd.merge(MAT, AllCallMacsMarked, on='file_name',how='left')
-    MAT_w_prices = pd.merge(MAT_w_macs, AllCallPricesMarked, on='file_name',how='left',suffixes=('_macs', '_prices'))
-    MAT_w_prices.to_excel(campaign_directory + "misc/" + 'MAT_w_m_p.xlsx')
 
-    MAT_w_mvd=pd.merge(MAT_w_prices, AllCallMVDs[['file_name','mvd']], on='file_name',how='left')
-    MAT_w_terms=pd.merge(MAT_w_mvd, AllCallTERMS[['file_name','terms']], on='file_name',how='left')
-    MAT_w_macr=pd.merge(MAT_w_terms, AllCallMacR[['file_name','mac_r']], on='file_name',how='left')
-    MAT_w_igscomp=pd.merge(MAT_w_macr, AllCallIgsComps[['file_name','igs_comp']], on='file_name',how='left')
-    MAT_w_igscomp=MAT_w_igscomp.drop_duplicates(subset=['file_name'], keep='first')
-    MAT_w_igscomp.to_excel(campaign_directory + "misc/" + 'MAT_WITH_EVERYTHING.xlsx')
+    AllCallMacsMarked   = AllCallMacs.loc[
+        AllCallMacs.groupby('file_name')['best_mac_likelihood'].idxmax()
+    ].copy()
+    AllCallPricesMarked = AllCallPrices.loc[
+        AllCallPrices.groupby('file_name')['best_mac_likelihood'].idxmax()
+    ].copy()
 
-    MAT_volumes = measureDbAplitude(campaign_directory, measureDbAplitude(campaign_directory, MAT_w_igscomp,
-                                    'time_centroid_macs','mac' ), 'time_centroid_prices', 'prices')
-    MAT_volumes[['mvd','terms']] = MAT_volumes[['mvd','terms']].fillna(0)
-    MAT_volumes['best_price_likelihood']=MAT_volumes['best_mac_likelihood_prices'].fillna(0.1)
-    MAT_volumes['best_price_likelihood']=MAT_volumes['best_mac_likelihood_prices']/ np.max(MAT_volumes['best_mac_likelihood_prices'])
-    MAT_volumes['best_mac_likelihood'] = MAT_volumes['best_mac_likelihood_macs'].fillna(0.1)
-    MAT_volumes['best_mac_likelihood'] = MAT_volumes['best_mac_likelihood_macs'] / np.max(MAT_volumes['best_mac_likelihood_macs'])
-    MAT_volumes['score']=MAT_volumes['score']*MAT_volumes['best_mac_likelihood_macs']*MAT_volumes['best_mac_likelihood_prices']
+    TOLERANCE = 0.85
+    AllCallMacsMarked['mac_warn']   = AllCallMacsMarked['best_mac_likelihood'] < TOLERANCE
+    AllCallPricesMarked['price_warn'] = AllCallPricesMarked['best_mac_likelihood'] < TOLERANCE
 
-    MAT_volumes['score'] = MAT_volumes['score']*MAT_volumes['best_mac_likelihood_macs']*MAT_volumes['best_mac_likelihood_prices']
-    MAT_volumes['pen_factor']=1+(0.9-MAT_volumes['agent_participation'])
+    # ── Merge de todos los datos en MAT ──────────────────────────────────────
+    MAT_w = pd.merge(MAT, AllCallMacsMarked[['file_name', 'best_mac_likelihood',
+                                              'best_mac_window', 'times_said', 'mac_warn']],
+                     on='file_name', how='left')
+    MAT_w = pd.merge(MAT_w, AllCallPricesMarked[['file_name', 'best_mac_likelihood',
+                                                   'times_said', 'price_warn']],
+                     on='file_name', how='left', suffixes=('_macs', '_prices'))
+    MAT_w = pd.merge(MAT_w, AllCallMVDs[['file_name', 'mvd']],   on='file_name', how='left')
+    MAT_w = pd.merge(MAT_w, AllCallTERMS[['file_name', 'terms']], on='file_name', how='left')
+    MAT_w = pd.merge(MAT_w, AllCallMacR[['file_name', 'mac_r']],  on='file_name', how='left')
+    MAT_w = pd.merge(MAT_w, AllCallIgsComps[['file_name', 'igs_comp']], on='file_name', how='left')
+    MAT_w = MAT_w.drop_duplicates(subset=['file_name'], keep='first')
+    MAT_w.to_excel(campaign_directory + "misc/MAT_WITH_EVERYTHING.xlsx")
 
-    MAT_volumes['score'] = (MAT_volumes['score']*MAT_volumes['pen_factor']**(1/6))
+    # ── Normalizar columnas de likelihood ────────────────────────────────────
+    MAT_w[['mvd', 'terms', 'mac_r', 'igs_comp']] = \
+        MAT_w[['mvd', 'terms', 'mac_r', 'igs_comp']].fillna(0)
 
-    perfect_Score = perfect_Score * 0.95 * 0.95 * 0.9
-    print(perfect_Score)
-    print(MAT_volumes['score'])
-    perfect_Score_final= np.max(MAT_volumes['score'])
+    mac_like_col   = 'best_mac_likelihood_macs'
+    price_like_col = 'best_mac_likelihood_prices'
 
-    qt = QuantileTransformer(n_quantiles=1000, output_distribution='uniform', random_state=42)
+    mac_max   = MAT_w[mac_like_col].max()
+    price_max = MAT_w[price_like_col].max()
+    MAT_w['best_mac_likelihood']   = MAT_w[mac_like_col].fillna(0.0) / (mac_max   if mac_max   > 0 else 1.0)
+    MAT_w['best_price_likelihood'] = MAT_w[price_like_col].fillna(0.0) / (price_max if price_max > 0 else 1.0)
+    MAT_w['mac_times_said']   = MAT_w.get('times_said_macs',   MAT_w.get('times_said', 0)).fillna(0)
+    MAT_w['price_times_said'] = MAT_w.get('times_said_prices', 0)
 
-    MAT_volumes['score']=MAT_volumes['score']/perfect_Score_final*10
-    MAT_volumes['score'] = qt.fit_transform(MAT_volumes[['score']])
-    MAT_volumes['score'] = MAT_volumes['score']*10
-    print("score after quantile transform: " + str(MAT_volumes['score'].mean()))
-    MAT_volumes['score']=np.clip(MAT_volumes['score'],0,10)
+    # Amplitud de voz
+    MAT_volumes = measureDbAplitude(
+        campaign_directory,
+        measureDbAplitude(campaign_directory, MAT_w, 'time_centroid_macs', 'mac'),
+        'time_centroid_prices', 'prices',
+    )
 
-    MAT_volumes.to_excel(campaign_directory + "misc/" + 'MAT_VOLUMES.xlsx')
-    #print('DROP: ' + str(MAT_complete))
-    #print(MAT_complete['file_name'])
-    #MAT_CALLS_THIS_CAMPAIGN=filter_dataframe_by_directory(MAT_w_prices,campaign_directory,'file_name')
-    MAT_CALLS_THIS_CAMPAIGN=MAT_volumes
-    print('SE TIENEN: ' + str(len(MAT_CALLS_THIS_CAMPAIGN)) + 'LLAMADAS CALIFICADAS')
-    statistics['mean_centroid'] = statistics['mean_centroid'] / np.max(
-        statistics['mean_centroid'])
-    MAT_CALLS_THIS_CAMPAIGN['LEAD_ID'] = MAT_CALLS_THIS_CAMPAIGN['LEAD_ID'].fillna(0)
-    MAT_CALLS_THIS_CAMPAIGN['LEAD_ID'] = MAT_CALLS_THIS_CAMPAIGN['LEAD_ID'].astype(str)
-    MAT_CALLS_THIS_CAMPAIGN['AGENT_ID'] = MAT_CALLS_THIS_CAMPAIGN['AGENT_ID'].fillna(0)
-    MAT_CALLS_THIS_CAMPAIGN['AGENT_ID'] = MAT_CALLS_THIS_CAMPAIGN['AGENT_ID'].astype(str)
-    MAT_complete_topics = pd.merge(topics_transcripts_convers, MAT_CALLS_THIS_CAMPAIGN[['id','file_name','transcript']], left_on='file_name',
-                                   right_on='file_name', how='right')
+    # ── Enriquecer con flags de compliance por tópico ────────────────────────
+    MAT_volumes = _enrich_with_compliance_flags(MAT_volumes, values_per_topic_for_all_convs)
 
-    return MAT_CALLS_THIS_CAMPAIGN,statistics,MAT_complete_topics,NOPERM,topics_stats_convs_scores,values_per_topic_for_all_convs
+    # ── Determinar flujo MAC ─────────────────────────────────────────────────
+    mac_flow_cols = MAT_volumes.apply(_compute_mac_flow, axis=1, result_type='expand')
+    MAT_volumes = pd.concat([MAT_volumes, mac_flow_cols], axis=1)
+
+    # ── Aplicar confianza media de transcripción ──────────────────────────────
+    MAT_volumes['confidence_score'] = MAT_volumes['file_name'].map(conf_map).fillna(0.0)
+
+    # ── Calcular las cinco dimensiones ───────────────────────────────────────
+    MAT_volumes['score_d1_mac_venta']  = MAT_volumes.apply(_score_d1_mac_venta,  axis=1)
+    MAT_volumes['score_d2_compliance'] = MAT_volumes.apply(_score_d2_compliance, axis=1)
+    MAT_volumes['score_d3_script']     = MAT_volumes.apply(_score_d3_script,     axis=1)
+    MAT_volumes['score_d4_engagement'] = MAT_volumes.apply(_score_d4_engagement, axis=1)
+    MAT_volumes['score_d5_audio']      = MAT_volumes.apply(_score_d5_audio,      axis=1)
+
+    # ── Score final ponderado (suma de dimensiones × pesos MDCL v3) ──────────
+    MAT_volumes['score'] = (
+        MAT_volumes['score_d1_mac_venta']  * DIMENSION_WEIGHTS['d1_mac_venta']
+        + MAT_volumes['score_d2_compliance'] * DIMENSION_WEIGHTS['d2_compliance']
+        + MAT_volumes['score_d3_script']     * DIMENSION_WEIGHTS['d3_script']
+        + MAT_volumes['score_d4_engagement'] * DIMENSION_WEIGHTS['d4_engagement']
+        + MAT_volumes['score_d5_audio']      * DIMENSION_WEIGHTS['d5_audio']
+    )
+    MAT_volumes['score'] = np.clip(MAT_volumes['score'], 0.0, 10.0)
+    MAT_volumes['score_version'] = SCORE_VERSION
+
+    MAT_volumes.to_excel(campaign_directory + "misc/MAT_VOLUMES.xlsx")
+
+    # ── Post-proceso de IDs y estadísticas ───────────────────────────────────
+    MAT_CALLS_THIS_CAMPAIGN = MAT_volumes.copy()
+    print(f"SE TIENEN: {len(MAT_CALLS_THIS_CAMPAIGN)} LLAMADAS CALIFICADAS")
+
+    statistics['mean_centroid'] = statistics['mean_centroid'] / np.max(statistics['mean_centroid'])
+
+    for id_col in ('LEAD_ID', 'AGENT_ID'):
+        MAT_CALLS_THIS_CAMPAIGN[id_col] = MAT_CALLS_THIS_CAMPAIGN[id_col].fillna(0).astype(str)
+
+    MAT_complete_topics = pd.merge(
+        topics_transcripts_convers,
+        MAT_CALLS_THIS_CAMPAIGN[['id', 'file_name', 'transcript']],
+        on='file_name', how='right',
+    )
+
+    return (
+        MAT_CALLS_THIS_CAMPAIGN,
+        statistics,
+        MAT_complete_topics,
+        NOPERM,
+        topics_stats_convs_scores,
+        values_per_topic_for_all_convs,
+    )
 
