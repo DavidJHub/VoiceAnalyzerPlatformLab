@@ -332,7 +332,7 @@ def main(PREFIX,days_ago,mode,oparam1=None):
     print(f"campaign_parameters['has_vc'] = {campaign_parameters['has_vc']}")
     promedio_vc=0.0
     if campaign_parameters["has_vc"]:
-        MAT_CALLS_CAMPAIGN, promedio_vc = consent_evaluation(MAT_CALLS_CAMPAIGN, do_it=True)
+        MAT_CALLS_CAMPAIGN, promedio_vc = consent_evaluation(MAT_CALLS_CAMPAIGN, do_it=False)
 
     # ---------------------------------------------------------------
     # AÑADIR ETIQUETAS ADICIONALES AL JSON DE DISPLAY
