@@ -238,7 +238,7 @@ def main(PREFIX,days_ago,mode,oparam1=None):
     # ---------------------------------------------------------------
     # MEDICION DE VELOCIDAD Y VOLUMEN EN VENTANAS
     # ---------------------------------------------------------------
-    audioData_vel, _ = audioOutputWpm(
+    df_windows_wpm, audioData_vel = audioOutputWpm(
                                     audio_outputs=audioData,
                                     df_windows=df_windows,
                                     transcripts_dir=campaign_directory,
@@ -246,9 +246,8 @@ def main(PREFIX,days_ago,mode,oparam1=None):
                                     hop_sec=1,
                                     vol_agg="mean"
                                 )
-    summary_excel_path=os.path.join(campaign_directory, "misc/audio_outputs_test.xlsx")
-    df_windows.to_excel(os.path.join(campaign_directory, "misc/audio_windows_test.xlsx"), index=False)
-    audioData_vel.to_excel(summary_excel_path, index=False)
+    summary_excel_path = os.path.join(campaign_directory, "misc/audio_outputs_test.xlsx")
+    df_windows_wpm.to_excel(summary_excel_path, index=False)
 
     # ---------------------------------------------------------------
     # SETUP DE CALIFICACIÓN (EN MODO GPU INSTANCE ESTA PARTE SE HACE EXTERNA A LA EC2 Y LOCAL)

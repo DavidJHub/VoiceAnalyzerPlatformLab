@@ -22,168 +22,109 @@ def audioOutputWpm(
     file_col: str = "file_name",
     window_sec: int = 1,
     hop_sec: int = 1,
-    vol_agg: str = "mean",              # "mean" o "median"
+    vol_agg: str = "mean",
     json_glob: str = "*_transcript.json",
 ):
     """
-    Pipeline completo:
-      1) Ingesta de transcritos JSON desde transcripts_dir
-      2) Crea match-key:
-           - json_key = json_filename.split('_transcript')[0]
-           - audio_key = file_name.split('.')[0]
-      3) Cruce con audio_outputs
-      4) Calcula y agrega (usando df_windows con columnas file_name/time_window/vol_window):
-           - times_5s
-           - vols_5s
-           - wpm_5s
-    Retorna:
-      out_df, report_dict
+    1) Reads sentences from transcript JSONs at:
+         results -> channels[] -> alternatives[] -> sentences[]
+       Each sentence has: text, start, end.
+       Word count = len(text.split()).
+    2) For each window in df_windows (file_name, time_window, vol_window) computes WPM:
+         Sentences whose midpoint (start+end)/2 falls in [time_window, time_window+window_sec)
+         contribute their word count.  wpm = total_words / window_sec * 60
+    3) Adds 'wpm' column to df_windows (in-place copy).
+    Returns:
+      (df_windows_enriched, audio_outputs_with_match_key)
     """
+    import json as _json
 
-    # ----------------------------
+    # ------------------------------------------------------------------
     # Helpers
-    # ----------------------------
-    def json_key_from_filename(fname: str) -> str:
-        # "....-all_transcript.json" -> "....-all"
-        base = os.path.basename(fname)
-        return base.split("_transcript")[0]
+    # ------------------------------------------------------------------
+    def _json_key(path: str) -> str:
+        return os.path.basename(path).split("_transcript")[0]
 
-    def audio_key_from_file_name(fname: str) -> str:
-        # "....-all.mp3" -> "....-all"
-        base = os.path.basename(fname)
-        return base.split(".")[0]
+    def _audio_key(fname: str) -> str:
+        return os.path.basename(fname).split(".")[0]
 
-    def aggregate_signal_1s_to_5s(vols_1s: np.ndarray, T: int):
-        starts = np.arange(0, T - window_sec + 1, hop_sec, dtype=int)
-        if vol_agg == "median":
-            v5 = np.array([np.nanmedian(vols_1s[s:s+window_sec]) for s in starts], dtype=float)
-        else:
-            v5 = np.array([np.nanmean(vols_1s[s:s+window_sec]) for s in starts], dtype=float)
-        t5 = (starts + window_sec).astype(int)  # fin de ventana
-        return t5, v5
+    def _parse_sentences(path: str) -> List[Dict[str, Any]]:
+        """Extract sentences list from Deepgram-style transcript JSON."""
+        with open(path, "r", encoding="utf-8") as fh:
+            data = _json.load(fh)
+        out: List[Dict[str, Any]] = []
+        try:
+            channels = data["results"]["channels"]
+        except (KeyError, TypeError):
+            return out
+        for ch in channels:
+            for alt in ch.get("alternatives", []):
+                for s in alt.get("sentences", []):
+                    text = s.get("text", "")
+                    try:
+                        start = float(s["start"])
+                        end   = float(s["end"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    words = len(text.split())
+                    if words > 0 and end > start:
+                        out.append({"words": words, "start": start, "end": end,
+                                    "mid": (start + end) * 0.5})
+        return out
 
-    def wpm_5s_from_words(words_df: pd.DataFrame, T: int):
-        """
-        Regla discreta:
-          t_mid=(start+end)/2
-          bin_end=ceil(t_mid)
-          counts[bin_end]++
-        Luego agrega counts por ventanas de window_sec.
-        """
-        counts_1s = np.zeros(T + 1, dtype=int)
-
-        if words_df is not None and len(words_df):
-            starts = pd.to_numeric(words_df["start"], errors="coerce").to_numpy()
-            ends   = pd.to_numeric(words_df["end"],   errors="coerce").to_numpy()
-            m = np.isfinite(starts) & np.isfinite(ends)
-            starts, ends = starts[m], ends[m]
-
-            swap = starts > ends
-            if np.any(swap):
-                starts[swap], ends[swap] = ends[swap], starts[swap]
-
-            t_mid = (starts + ends) / 2.0
-            bin_end = np.ceil(t_mid).astype(int)
-
-            # filtrar fuera de rango (NO clip)
-            bin_end = bin_end[(bin_end >= 0) & (bin_end <= T)]
-            if len(bin_end):
-                counts_1s += np.bincount(bin_end, minlength=T + 1).astype(int)
-
-            # requisito: counts[0]=0
-            if counts_1s[0] > 0 and T >= 1:
-                counts_1s[1] += counts_1s[0]
-                counts_1s[0] = 0
-
-        starts_win = np.arange(0, T - window_sec + 1, hop_sec, dtype=int)
-        words_5s = np.array([counts_1s[s:s+window_sec].sum() for s in starts_win], dtype=float)
-        wpm_5s = words_5s * 60.0 / window_sec
-        t5 = (starts_win + window_sec).astype(int)
-        return t5, wpm_5s
-
-    # ----------------------------
-    # 1) Ingesta de transcritos -> dict key -> words_df
-    # ----------------------------
+    # ------------------------------------------------------------------
+    # 1) Load sentences keyed by transcript stem
+    # ------------------------------------------------------------------
     transcript_paths = sorted(glob.glob(os.path.join(transcripts_dir, json_glob)))
 
-    words_by_key = {}
-    ingest_errors = []
+    sentences_by_key: Dict[str, List[Dict[str, Any]]] = {}
+    ingest_errors: List[Dict[str, str]] = []
 
     for p in transcript_paths:
         try:
-            _, words_df, _ = jsonDecompose(p)
-            key = json_key_from_filename(p)
-            words_by_key[key] = words_df
-        except Exception as e:
-            ingest_errors.append({"path": p, "error": str(e)})
+            sentences_by_key[_json_key(p)] = _parse_sentences(p)
+        except Exception as exc:
+            ingest_errors.append({"path": p, "error": str(exc)})
 
-    # Índice rápido: file_name -> arrays de ventanas (ordenados por tiempo)
-    windows_by_file: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
-    for fname, grp in df_windows.groupby("file_name", sort=False):
-        grp_sorted = grp.sort_values("time_window")
-        windows_by_file[fname] = (
-            grp_sorted["time_window"].to_numpy(dtype=float),
-            grp_sorted["vol_window"].to_numpy(dtype=float),
-        )
-
-    # ----------------------------
-    # 2) Cruce + 3) Cálculo 5s
-    # ----------------------------
+    # ------------------------------------------------------------------
+    # 2) Add match_key to audio_outputs (non-destructive copy)
+    # ------------------------------------------------------------------
     out = audio_outputs.copy()
-    out["match_key"] = out[file_col].apply(audio_key_from_file_name)
+    out["match_key"] = out[file_col].apply(_audio_key)
 
-    out["times_5s"] = None
-    out["vols_5s"]  = None
-    out["wpm_5s"]   = None
+    # ------------------------------------------------------------------
+    # 3) Enrich df_windows with wpm
+    # ------------------------------------------------------------------
+    df_win = df_windows.copy()
+    df_win["wpm"] = 0.0
 
-    missing_transcript = []
-    computed = 0
+    files_with_transcript = 0
 
-    for idx, row in out.iterrows():
-        key = row["match_key"]
-        words_df = words_by_key.get(key)
-        if words_df is None:
-            missing_transcript.append(key)
+    for file_name, grp in df_win.groupby("file_name", sort=False):
+        key = _audio_key(file_name)
+        sentences = sentences_by_key.get(key)
+        if not sentences:
             continue
+        files_with_transcript += 1
 
-        win_entry = windows_by_file.get(row[file_col])
-        if win_entry is None:
-            times_1s = np.array([], dtype=float)
-            vols_1s  = np.array([], dtype=float)
-        else:
-            times_1s, vols_1s = win_entry
-
-        try:
-            T = int(times_1s[-1]) if len(times_1s) > 0 else 300
-        except (ValueError, IndexError):
-            T = 300
-
-        # volumen 5s (reusa vols)
-        t5_vol, v5 = aggregate_signal_1s_to_5s(vols_1s, T)
-
-        # wpm 5s (misma grilla por T)
-        t5_wpm, wpm5 = wpm_5s_from_words(words_df, T)
-
-        # sanity: deben coincidir los endpoints
-        if not np.array_equal(t5_vol, t5_wpm):
-            raise ValueError(f"{row[file_col]}: times_5s de volumen y wpm no coinciden")
-
-        out.at[idx, "times_5s"] = t5_vol.tolist()
-        out.at[idx, "vols_5s"]  = v5.tolist()
-        out.at[idx, "wpm_5s"]   = wpm5.tolist()
-        computed += 1
+        for idx in grp.index:
+            t_start = df_win.at[idx, "time_window"]
+            t_end   = t_start + window_sec
+            words_in_window = sum(
+                s["words"] for s in sentences
+                if t_start <= s["mid"] < t_end
+            )
+            df_win.at[idx, "wpm"] = words_in_window * 60.0 / window_sec
 
     report = {
-        "transcripts_found": len(transcript_paths),
-        "transcripts_ingested": len(words_by_key),
-        "ingest_errors": ingest_errors,  # lista de dicts
-        "rows_total": len(out),
-        "rows_computed": computed,
-        "rows_missing_transcript": len(missing_transcript),
-        "missing_transcript_keys_sample": sorted(set(missing_transcript))[:20],
+        "transcripts_found":     len(transcript_paths),
+        "transcripts_ingested":  len(sentences_by_key),
+        "ingest_errors":         ingest_errors,
+        "windows_total":         len(df_win),
+        "files_with_transcript": files_with_transcript,
     }
 
-    return out, report
+    return df_win, out
 
 
 
@@ -385,7 +326,6 @@ def main_process_batch(
                 "hangup_n_detections": int(hangup_n_detections),
                 "times_det": times_det,
                 "hangup_signaturetime": None if hangup_signaturetime is None else float(hangup_signaturetime),
-                "y_proc": y_comp['y_clean'],
                 "time_overlap": time_overlap,
                 "duration_overlap": duration_overlap,
                 "score_overlap": score_overlap,
@@ -407,7 +347,6 @@ def main_process_batch(
                 "hangup_n_detections": 0,
                 "times_det": [],
                 "hangup_signaturetime": np.nan,
-                "y_proc": np.array([], dtype=np.float32),
                 "time_overlap":  np.nan,
                 "duration_overlap":  np.nan,
                 "score_overlap":  np.nan,
@@ -424,7 +363,6 @@ def main_process_batch(
                 "hangup_n_detections",
                 "times_det",
                 "hangup_signaturetime",
-                "y_proc",
                 "time_overlap",
                 "duration_overlap",
                 "score_overlap",
@@ -436,8 +374,7 @@ def main_process_batch(
     df_windows = pd.DataFrame(window_rows, columns=["file_name", "time_window", "vol_window"])
 
     if verbose:
-        ok = (df_audio["y_proc"].apply(lambda a: isinstance(a, np.ndarray) and a.size > 0)).sum()
-        print(f"[main] Listo. {ok}/{len(df_audio)} con audio procesado escrito en '{output_dir}'.")
+        print(f"[main] Listo. {len(df_audio)} archivos procesados en '{output_dir}'.")
 
     return df_audio, df_windows
 
