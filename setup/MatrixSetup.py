@@ -28,7 +28,7 @@ mac_sign='MAC'
 precio_sign='PRECIO'
 
 mapping = pd.read_excel('TOPIC_MAPPING.xlsx')
-
+mapping['cluster'] = mapping['cluster'].astype(str).str.lower()
 
 
 
@@ -40,7 +40,7 @@ def replace_cluster_values(df, mapping_df,clust_name):
     :param mapping_df: DataFrame con dos columnas, donde la primera es el valor original y la segunda el valor mapeado.
     :return: DataFrame con los valores de 'cluster' reemplazados.
     """
-    mapping_dict = dict(zip(mapping_df.iloc[:, 0], mapping_df.iloc[:, 1]))
+    mapping_dict = dict(zip(mapping_df.iloc[:, 0].apply(str.lower), mapping_df.iloc[:, 1]))
     df[clust_name] = df[clust_name].map(mapping_dict).fillna(df['cluster'])
     return df
 
@@ -212,8 +212,8 @@ def matrix_setup(path_campaña,campaign_directory,inventario):
                 clust_name, kw_name, other_kws = GetMatrix(evaluation_matrix_df)
             clust_name = clust_name.lower() if clust_name else 'cluster'
             kw_name = kw_name.lower() if kw_name else 'name'
+            evaluation_matrix_df[clust_name] = evaluation_matrix_df[clust_name].astype(str).str.lower()
             evaluation_matrix_df.columns = evaluation_matrix_df.columns.str.lower()
-            evaluation_matrix_df[clust_name] = evaluation_matrix_df[clust_name]
             if 'MODULO' in evaluation_matrix_df.columns:
                 evaluation_matrix_df['MODULO'] = evaluation_matrix_df['MODULO'].ffill()
             evaluation_matrix_df =  replace_cluster_values(evaluation_matrix_df,mapping,clust_name)

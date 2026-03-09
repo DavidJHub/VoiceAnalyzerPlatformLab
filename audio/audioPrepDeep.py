@@ -191,7 +191,7 @@ def list_audio_files(input_dir: str,
                      pattern: str = "**/*",
                      exts: Iterable[str] = (".wav", ".mp3", ".flac", ".ogg", ".m4a")) -> List[str]:
     return sorted([
-        p for p in glob.glob(os.path.join(input_dir, pattern), recursive=True)
+        p for p in glob.glob(os.path.join(input_dir, pattern), recursive=False)
         if os.path.isfile(p) and os.path.splitext(p)[1].lower() in exts
     ])
 
