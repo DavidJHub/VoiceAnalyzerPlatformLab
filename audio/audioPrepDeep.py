@@ -17,10 +17,9 @@ from utils.VapUtils import jsonDecompose
 
 def audioOutputWpm(
     audio_outputs: pd.DataFrame,
+    df_windows: pd.DataFrame,
     transcripts_dir: str,
     file_col: str = "file_name",
-    times_col: str = "times",
-    vols_col: str = "vols",
     window_sec: int = 1,
     hop_sec: int = 1,
     vol_agg: str = "mean",              # "mean" o "median"
@@ -33,7 +32,7 @@ def audioOutputWpm(
            - json_key = json_filename.split('_transcript')[0]
            - audio_key = file_name.split('.')[0]
       3) Cruce con audio_outputs
-      4) Calcula y agrega:
+      4) Calcula y agrega (usando df_windows con columnas file_name/time_window/vol_window):
            - times_5s
            - vols_5s
            - wpm_5s
@@ -118,6 +117,15 @@ def audioOutputWpm(
         except Exception as e:
             ingest_errors.append({"path": p, "error": str(e)})
 
+    # Índice rápido: file_name -> arrays de ventanas (ordenados por tiempo)
+    windows_by_file: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+    for fname, grp in df_windows.groupby("file_name", sort=False):
+        grp_sorted = grp.sort_values("time_window")
+        windows_by_file[fname] = (
+            grp_sorted["time_window"].to_numpy(dtype=float),
+            grp_sorted["vol_window"].to_numpy(dtype=float),
+        )
+
     # ----------------------------
     # 2) Cruce + 3) Cálculo 5s
     # ----------------------------
@@ -138,15 +146,17 @@ def audioOutputWpm(
             missing_transcript.append(key)
             continue
 
-        times_1s = np.asarray(row[times_col], dtype=float)
-        vols_1s  = np.asarray(row[vols_col],  dtype=float)
+        win_entry = windows_by_file.get(row[file_col])
+        if win_entry is None:
+            times_1s = np.array([], dtype=float)
+            vols_1s  = np.array([], dtype=float)
+        else:
+            times_1s, vols_1s = win_entry
 
-        if len(times_1s) != len(vols_1s):
-            raise ValueError(f"{row[file_col]}: times y vols longitudes distintas ({len(times_1s)} vs {len(vols_1s)})")
         try:
-            T = int(times_1s[-1])  # duración discretizada (último segundo)
+            T = int(times_1s[-1]) if len(times_1s) > 0 else 300
         except (ValueError, IndexError):
-            T=300
+            T = 300
 
         # volumen 5s (reusa vols)
         t5_vol, v5 = aggregate_signal_1s_to_5s(vols_1s, T)

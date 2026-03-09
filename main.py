@@ -56,7 +56,7 @@ def preprocess_in_batches(
 ):
     """
     Llama a main_process_batch en uno o varios batches, dependiendo de cuántos audios haya.
-    Devuelve un único DataFrame audioData con todos los resultados.
+    Devuelve (df_audio, df_windows): DataFrames con métricas por archivo y ventanas de volumen.
     """
 
     # Asegurar carpeta misc
@@ -78,12 +78,12 @@ def preprocess_in_batches(
 
     if len(audio_files) == 0:
         print("No se encontraron audios para preprocesar.")
-        # Devolvemos un DF vacío con las columnas mínimas esperadas
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
+
     # 2. Si no excede el batch_size, se comporta como antes: un solo llamado
     if len(audio_files) <= batch_size:
         print("Número de archivos menor o igual al batch_size, usando main_process_batch normal.")
-        audioData = main_process_batch(
+        df_audio, df_windows = main_process_batch(
             input_dir=campaign_directory,
             output_dir=processed_output_directory,
             template_path=hangup_signature,
@@ -92,7 +92,7 @@ def preprocess_in_batches(
             force_wav_out=True,
             verbose=True,
         )
-        return audioData
+        return df_audio, df_windows
 
     # 3. Si excede, partimos en batches
     print(f"Procesando en batches de tamaño {batch_size}...")
@@ -100,7 +100,8 @@ def preprocess_in_batches(
     tmp_input_dir = os.path.join(campaign_directory, "_tmp_batch_input")
     os.makedirs(tmp_input_dir, exist_ok=True)
 
-    all_batches = []
+    all_audio_batches = []
+    all_window_batches = []
 
     for batch_idx, files_batch in enumerate(chunk_list(audio_files, batch_size), start=1):
         print(f"--- PREPROCESSING BATCH {batch_idx} ({len(files_batch)} files) ---")
@@ -121,9 +122,7 @@ def preprocess_in_batches(
             except OSError:
                 shutil.copy2(src, dst)  # si no se puede hardlink, copiar
 
-        batch_excel_path = os.path.join(misc_dir, f"audio_outputs_test_batch{batch_idx}.xlsx")
-
-        audioData_batch = main_process_batch(
+        df_audio_batch, df_windows_batch = main_process_batch(
             input_dir=tmp_input_dir,
             output_dir=processed_output_directory,
             template_path=hangup_signature,
@@ -132,15 +131,17 @@ def preprocess_in_batches(
             force_wav_out=True,
             verbose=True,
         )
-        
-        all_batches.append(audioData_batch)
 
-    # 4. Unir todos los resultados en un solo DataFrame
-    if len(all_batches) == 0:
-        return pd.DataFrame()
-    audioData = pd.concat(all_batches, ignore_index=True)
+        all_audio_batches.append(df_audio_batch)
+        all_window_batches.append(df_windows_batch)
 
-    return audioData
+    # 4. Unir todos los resultados
+    if len(all_audio_batches) == 0:
+        return pd.DataFrame(), pd.DataFrame()
+    df_audio = pd.concat(all_audio_batches, ignore_index=True)
+    df_windows = pd.concat(all_window_batches, ignore_index=True)
+
+    return df_audio, df_windows
 
 
 def main(PREFIX,days_ago,mode,oparam1=None):
@@ -215,7 +216,7 @@ def main(PREFIX,days_ago,mode,oparam1=None):
     # ---------------------------------------------------------------
     BATCH_SIZE = 200
 
-    audioData = preprocess_in_batches(
+    audioData, df_windows = preprocess_in_batches(
         campaign_directory=campaign_directory,
         processed_output_directory=processed_output_directory,
         hangup_signature=hangup_signature,
@@ -239,6 +240,7 @@ def main(PREFIX,days_ago,mode,oparam1=None):
     # ---------------------------------------------------------------
     audioData_vel, _ = audioOutputWpm(
                                     audio_outputs=audioData,
+                                    df_windows=df_windows,
                                     transcripts_dir=campaign_directory,
                                     window_sec=1,
                                     hop_sec=1,
