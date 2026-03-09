@@ -230,7 +230,7 @@ def main_process_batch(
     # ventanas de volumen (~3 s) para array["vol_3sec_window"]
     vol_window_sec: float = 3.0,
     vol_hop_sec: Optional[float] = None,
-) -> pd.DataFrame:
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Flujo por archivo (SR fijo a 8000 Hz):
       load_audio (resample si hace falta) -> cut_dial_start -> detect_signature -> preprocess_audio_for_vad
@@ -238,6 +238,10 @@ def main_process_batch(
       -> detect_overlap_segments (legacy, basado en energía/centroides)
       -> detect_overlap_spectral (sin diarización, riqueza espectral)
       -> save_audio_to
+
+    Retorna:
+      df_audio    — un registro por archivo con métricas agregadas (sin arrays de ventanas).
+      df_windows  — un registro por ventana con columnas: file_name, time_window, vol_window.
     """
     TARGET_SR = 8000
 
@@ -258,6 +262,7 @@ def main_process_batch(
     tmpl_cache: Dict[int, np.ndarray] = {}
 
     rows: List[Dict[str, Any]] = []
+    window_rows: List[Dict[str, Any]] = []
 
     for i, in_path in enumerate(files, start=1):
         base = os.path.basename(in_path)
@@ -359,7 +364,10 @@ def main_process_batch(
 
             # 8) Volumen por ventanas (~3 s) en el audio procesado
             vol_db, t_starts = windowed_db(y_comp['y_clean'], sr, window_sec=1, hop_sec=vol_hop_sec)
-            # 9) Fila del DF
+            for t_w, v_w in zip(t_starts.tolist(), vol_db.tolist()):
+                window_rows.append({"file_name": base, "time_window": t_w, "vol_window": v_w})
+
+            # 9) Fila del DF principal
             rows.append({
                 "file_name": base,
                 "dialtime": None if dial_time is None else float(dial_time),
@@ -368,8 +376,6 @@ def main_process_batch(
                 "times_det": times_det,
                 "hangup_signaturetime": None if hangup_signaturetime is None else float(hangup_signaturetime),
                 "y_proc": y_comp['y_clean'],
-                "vols": vol_db,
-                "times": t_starts,
                 "time_overlap": time_overlap,
                 "duration_overlap": duration_overlap,
                 "score_overlap": score_overlap,
@@ -392,8 +398,6 @@ def main_process_batch(
                 "times_det": [],
                 "hangup_signaturetime": np.nan,
                 "y_proc": np.array([], dtype=np.float32),
-                "vols": np.array([], dtype=float),
-                "times": np.array([], dtype=float),
                 "time_overlap":  np.nan,
                 "duration_overlap":  np.nan,
                 "score_overlap":  np.nan,
@@ -402,8 +406,8 @@ def main_process_batch(
                 "overlap_ratio_in_speech":  np.nan,
             })
 
-    # Construye DataFrame
-    df = pd.DataFrame(rows, columns=[
+    # Construye DataFrames
+    df_audio = pd.DataFrame(rows, columns=[
                 "file_name",
                 "dialtime",
                 "sr",
@@ -411,8 +415,6 @@ def main_process_batch(
                 "times_det",
                 "hangup_signaturetime",
                 "y_proc",
-                "vols",
-                "times",
                 "time_overlap",
                 "duration_overlap",
                 "score_overlap",
@@ -421,11 +423,13 @@ def main_process_batch(
                 "overlap_ratio_in_speech",
     ])
 
-    if verbose:
-        ok = (df["y_proc"].apply(lambda a: isinstance(a, np.ndarray) and a.size > 0)).sum()
-        print(f"[main] Listo. {ok}/{len(df)} con audio procesado escrito en '{output_dir}'.")
+    df_windows = pd.DataFrame(window_rows, columns=["file_name", "time_window", "vol_window"])
 
-    return df
+    if verbose:
+        ok = (df_audio["y_proc"].apply(lambda a: isinstance(a, np.ndarray) and a.size > 0)).sum()
+        print(f"[main] Listo. {ok}/{len(df_audio)} con audio procesado escrito en '{output_dir}'.")
+
+    return df_audio, df_windows
 
 
 if __name__ == "__main__":
@@ -438,7 +442,7 @@ if __name__ == "__main__":
         use_pcen=True, pcen_percentile=90.0, pcen_time_constant=0.05, pcen_gain=0.95,
         use_pitch_gate=True, use_webrtcvad=False, vad_aggressiveness=2,
     )
-    _ = main_process_batch(
+    _, _windows = main_process_batch(
         input_dir="process/test",
         output_dir="process/test/processed",
         template_path=hangup_signature,
