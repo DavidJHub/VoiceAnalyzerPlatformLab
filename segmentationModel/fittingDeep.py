@@ -6,6 +6,7 @@ import shutil
 import numpy as np
 import pandas as pd
 import torch
+from dotenv import load_dotenv
 
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
@@ -14,11 +15,10 @@ os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 # =============================
 # CONFIG
 # =============================
-# Modelo de TEXTO (HF estándar, guardado con save_pretrained)
-TEXT_MODEL_DIR = "model_avvillas_beto"
+load_dotenv()  # busca un .env en el cwd (directorio actual) o padres según tu ejecución
 
-# Priors de TIEMPO (JSON) guardado por training/train_text_plus_timeprior.py
-TIME_PRIORS_JSON = "reentreno/Colombia/Avvillas/model/time_priors_subtag.json"
+TEXT_MODEL_DIR = os.getenv("TEXT_MODEL_DIR")
+TIME_PRIORS_JSON = os.getenv("TIME_PRIORS_JSON")
 
 TEXT_COLUMN = "text"      # expected column in transcript CSV
 WINDOW_SIZE = 14          # words per window
