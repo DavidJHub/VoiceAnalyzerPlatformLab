@@ -1,4 +1,5 @@
 import glob
+import math
 from matplotlib import pyplot as plt
 import pandas as pd
 import soundfile as sf
@@ -101,6 +102,15 @@ def audioOutputWpm(
 
     # ------------------------------------------------------------------
     # 3) Enrich df_windows with wpm + debug columns
+    #
+    # Two-pass per file:
+    #   Pass 1 – for each window whose sentence midpoint falls inside it,
+    #            record num_words and delta_time (actual sentence duration).
+    #            wpm = num_words / delta_time * 60  (real rate, not /window_sec)
+    #   Pass 2 – forward-fill that wpm across the next ceil(delta_time)-1
+    #            consecutive windows that have no words of their own, so that
+    #            a sentence spanning 2.26 s covers windows t, t+1, t+2.
+    #            Fill stops when a window with its own data is reached.
     # ------------------------------------------------------------------
     df_win = df_windows.copy()
     df_win["num_words"]  = 0
@@ -116,15 +126,34 @@ def audioOutputWpm(
             continue
         files_with_transcript += 1
 
-        for idx in grp.index:
+        # keep indices in ascending time order
+        indices = grp.sort_values("time_window").index.tolist()
+
+        # Pass 1: raw metrics for windows that own a sentence midpoint
+        for idx in indices:
             t_start = df_win.at[idx, "time_window"]
             t_end   = t_start + window_sec
             matched = [s for s in sentences if t_start <= s["mid"] < t_end]
-            words_in_window  = sum(s["words"] for s in matched)
-            speech_in_window = sum(s["end"] - s["start"] for s in matched)
-            df_win.at[idx, "num_words"]  = words_in_window
-            df_win.at[idx, "delta_time"] = round(speech_in_window, 4)
-            df_win.at[idx, "wpm"]        = words_in_window * 60.0 / window_sec
+            words        = sum(s["words"] for s in matched)
+            speech_secs  = sum(s["end"] - s["start"] for s in matched)
+            df_win.at[idx, "num_words"]  = words
+            df_win.at[idx, "delta_time"] = round(speech_secs, 4)
+            if words > 0 and speech_secs > 0:
+                df_win.at[idx, "wpm"] = words / speech_secs * 60.0
+
+        # Pass 2: forward-fill wpm across ceil(delta_time) windows
+        for i, idx in enumerate(indices):
+            if df_win.at[idx, "num_words"] == 0:
+                continue
+            wpm_val = df_win.at[idx, "wpm"]
+            n_fill  = math.ceil(df_win.at[idx, "delta_time"])  # total windows to cover
+            for j in range(1, n_fill):
+                if i + j >= len(indices):
+                    break
+                next_idx = indices[i + j]
+                if df_win.at[next_idx, "num_words"] > 0:
+                    break  # next window has its own sentence — stop
+                df_win.at[next_idx, "wpm"] = wpm_val
 
     report = {
         "transcripts_found":     len(transcript_paths),
