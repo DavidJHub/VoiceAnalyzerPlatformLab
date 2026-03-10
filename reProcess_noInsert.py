@@ -145,9 +145,6 @@ def main(PREFIX,route):
     getTranscriptParagraphsJsonHighlights(final_json_route, permitidas, no_perm)
 
 
-    MAT_CALLS_CAMPAIGN['velocity_classification_macs']=MAT_CALLS_CAMPAIGN['topic_words_p_m_macs'].apply(lambda x: measure_speed_classification(x))
-    MAT_CALLS_CAMPAIGN['velocity_classification_prices']=MAT_CALLS_CAMPAIGN['topic_words_p_m_prices'].apply(lambda x: measure_speed_classification(x))
-
     insertTopicTagsJson(MAT_CALLS_CAMPAIGN, final_json_route)
     MAT_CALLS_CAMPAIGN.to_excel(campaign_directory+"misc/all_graded_full.xlsx")
 
