@@ -278,7 +278,8 @@ def main(PREFIX,days_ago,mode,oparam1=None):
     if not os.path.exists(campaign_directory+PREFIX+'_RECONS'):
         os.makedirs(campaign_directory+PREFIX+'_RECONS', exist_ok=True)
     (MAT_CALLS_CAMPAIGN,STATISTICS,MAT_COMPLETE_TOPICS,all_musnt_keywords,
-    topics_stats_convs_scores,topics_stats_convs)=score_camp(campaign_directory, PREFIX, TMO,topics_df)
+    topics_stats_convs_scores,topics_stats_convs)=score_camp(campaign_directory, PREFIX, TMO,topics_df,
+                                                             df_windows=audioData_vel)
 
     AGENTES_DB=config_agents(camp_id)
     AGENTES_DB.to_excel(campaign_directory+"misc/AGENTES_DB.xlsx")
