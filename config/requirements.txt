@@ -62,3 +62,7 @@ wasabi==1.1.2
 
 # -------- openai --------
 openai
+
+# -------- segmentation extras --------
+torchcrf>=1.1.0
+scipy>=1.13.0

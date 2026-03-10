@@ -244,8 +244,11 @@ def marcar_mac_price_def(df, topics_col='topics_sequence'):
         mac_vals = [t['confidence'] for t in lista_temas if t['topic'] == "MAC"]
         price_vals = [t['confidence'] for t in lista_temas if t['topic'] in ["PRECIO", "PRICE"]]
 
-        min_mac = min(mac_vals) if mac_vals else 0.0
-        min_price = min(price_vals) if price_vals else 0.0
+        # Issue #10: median is more robust than min against a single
+        # low-confidence window deflating the score of an otherwise
+        # confident consecutive group.
+        min_mac   = float(np.median(mac_vals))   if mac_vals   else 0.0
+        min_price = float(np.median(price_vals)) if price_vals else 0.0
 
         mac_conf.append(min_mac)
         price_conf.append(min_price)
