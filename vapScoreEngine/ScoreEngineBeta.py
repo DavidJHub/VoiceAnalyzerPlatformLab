@@ -12,7 +12,7 @@ from lang.VapLangUtils import normalize_text, get_kws, word_count, \
     correctCommonTranscriptionMistakes, splitConversations
 
 from setup.MatrixSetup import remove_connectors
-from utils.VapFunctions import measureDbAplitude, measure_speed_classification
+from utils.VapFunctions import measure_speed_classification
 from utils.VapUtils import jsonDecompose, get_data_from_name, jsonDecomposeSentencesHighlight, jsonTranscriptionToCsv, getTranscriptParagraphsJsonHighlights
 
 import numpy as np
@@ -487,13 +487,92 @@ def _score_d5_audio(row: pd.Series) -> float:
     """
     D5 — Calidad técnica del audio / transcripción ASR (0–10).
 
-    - confidence_score  → 7 pts (confianza media ASR, 0–1)
-    - silence_ratio     → 3 pts (menos silencio = mejor; 0 silencio = 3 pts)
+    Fuentes (todas pre-computadas por audioPrepDeep + audioOutputWpm):
+      - confidence_score         → 5 pts  (confianza media ASR, 0–1)
+      - silence_ratio            → 3 pts  (fracción de ventanas bajo umbral de silencio)
+      - overlap_ratio_in_speech  → 2 pts  (fracción de habla con solapamiento de voces)
     """
     conf    = float(row.get('confidence_score', 0.0) or 0.0)
     silence = float(row.get('silence_ratio', 0.0) or 0.0)
+    overlap = float(row.get('overlap_ratio_in_speech', 0.0) or 0.0)
+
     silence_pts = max(0.0, 3.0 * (1.0 - silence))
-    return round(min(conf * 7.0 + silence_pts, 10.0), 4)
+    overlap_pts = max(0.0, 2.0 * (1.0 - overlap))
+    return round(min(conf * 5.0 + silence_pts + overlap_pts, 10.0), 4)
+
+
+# Ventanas de 1 s cuyo volumen (dBFS) está por debajo de este umbral se
+# consideran silencio. −50 dBFS ≈ señal de ruido de fondo sin voz activa.
+_SILENCE_DB_THRESHOLD = -50.0
+
+
+def _enrich_with_audio_windows(mat: pd.DataFrame,
+                                df_windows: pd.DataFrame) -> pd.DataFrame:
+    """
+    Agrega a MAT estadísticas de audio derivadas de las ventanas de tiempo
+    pre-computadas por audioPrepDeep.main_process_batch + audioOutputWpm.
+
+    Parámetros
+    ----------
+    mat        : DataFrame principal de llamadas (una fila por llamada).
+    df_windows : DataFrame producido por audioOutputWpm(), con columnas:
+                   file_name, vols (np.ndarray de dBFS por ventana de 1 s),
+                   times (np.ndarray de t_starts), overlap_ratio_in_speech.
+
+    Columnas que se agregan / actualizan en MAT
+    -------------------------------------------
+    silence_ratio          : fracción de ventanas de 1 s bajo _SILENCE_DB_THRESHOLD
+    overlap_ratio_in_speech: fracción de habla con solapamiento de voces
+    vol_mean               : volumen medio (dBFS) de la llamada
+    vol_std                : desviación estándar del volumen (dBFS)
+    """
+    audio_cols = ('silence_ratio', 'overlap_ratio_in_speech', 'vol_mean', 'vol_std')
+
+    if df_windows is None or df_windows.empty:
+        for col in audio_cols:
+            if col not in mat.columns:
+                mat[col] = np.nan
+        return mat
+
+    def _key(fname: str) -> str:
+        """Normaliza nombre de archivo quitando extensión, para hacer el join."""
+        return os.path.splitext(os.path.basename(str(fname)))[0]
+
+    def _stats_from_row(row) -> dict:
+        vols = row.get('vols')
+        if vols is None or (hasattr(vols, '__len__') and len(vols) == 0):
+            return {'silence_ratio': np.nan, 'vol_mean': np.nan, 'vol_std': np.nan}
+        arr = np.asarray(vols, dtype=float)
+        arr = arr[np.isfinite(arr)]
+        if len(arr) == 0:
+            return {'silence_ratio': np.nan, 'vol_mean': np.nan, 'vol_std': np.nan}
+        return {
+            'silence_ratio': float(np.mean(arr < _SILENCE_DB_THRESHOLD)),
+            'vol_mean':      float(np.mean(arr)),
+            'vol_std':       float(np.std(arr)),
+        }
+
+    stats = df_windows.apply(_stats_from_row, axis=1, result_type='expand')
+    stats['file_key'] = df_windows['file_name'].apply(_key)
+
+    if 'overlap_ratio_in_speech' in df_windows.columns:
+        stats['overlap_ratio_in_speech'] = df_windows['overlap_ratio_in_speech'].values
+    else:
+        stats['overlap_ratio_in_speech'] = np.nan
+
+    stats_map = stats.set_index('file_key')
+
+    def _lookup(fname: str, col: str):
+        key = _key(fname)
+        if key in stats_map.index:
+            val = stats_map.at[key, col]
+            return float(val) if (val is not None and not (isinstance(val, float) and np.isnan(val))) else np.nan
+        return np.nan
+
+    for col in audio_cols:
+        mat[col] = mat['file_name'].apply(lambda f, c=col: _lookup(f, c))
+
+    return mat
 
 
 def _enrich_with_compliance_flags(mat: pd.DataFrame,
@@ -539,7 +618,8 @@ def _enrich_with_compliance_flags(mat: pd.DataFrame,
     return mat
 
 
-def score_camp(campaign_directory, campaign_id, TMO, topics_combined_df):
+def score_camp(campaign_directory, campaign_id, TMO, topics_combined_df,
+               df_windows: pd.DataFrame = None):
     """
     Pipeline principal de calificación de llamadas — modelo MDCL v3.
 
@@ -553,6 +633,10 @@ def score_camp(campaign_directory, campaign_id, TMO, topics_combined_df):
         Tiempo medio objetivo de la llamada en minutos (referencia de campaña).
     topics_combined_df : pd.DataFrame
         DataFrame de la matriz de calificación con columnas 'name' y 'cluster'.
+    df_windows : pd.DataFrame, opcional
+        Salida de audioOutputWpm() con columnas file_name, vols, times,
+        overlap_ratio_in_speech, etc. Se usa para calcular silence_ratio y
+        overlap en D5. Si es None, D5 sólo usa confidence_score de ASR.
 
     Retorna
     -------
@@ -702,12 +786,12 @@ def score_camp(campaign_directory, campaign_id, TMO, topics_combined_df):
     MAT_w['mac_times_said']   = MAT_w.get('times_said_macs',   MAT_w.get('times_said', 0)).fillna(0)
     MAT_w['price_times_said'] = MAT_w.get('times_said_prices', 0)
 
-    # Amplitud de voz
-    MAT_volumes = measureDbAplitude(
-        campaign_directory,
-        measureDbAplitude(campaign_directory, MAT_w, 'time_centroid_macs', 'mac'),
-        'time_centroid_prices', 'prices',
-    )
+    # ── Estadísticas de audio desde ventanas pre-computadas ──────────────────
+    # Reemplaza measureDbAplitude (lectura de archivos de audio en disco).
+    # df_windows proviene de audioOutputWpm() en main.py y ya contiene
+    # silence_ratio, overlap_ratio_in_speech y vol_mean derivados de las
+    # ventanas de 1 s calculadas por audioPrepDeep.main_process_batch.
+    MAT_volumes = _enrich_with_audio_windows(MAT_w, df_windows)
 
     # ── Enriquecer con flags de compliance por tópico ────────────────────────
     MAT_volumes = _enrich_with_compliance_flags(MAT_volumes, values_per_topic_for_all_convs)
