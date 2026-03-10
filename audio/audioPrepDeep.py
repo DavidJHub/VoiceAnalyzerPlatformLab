@@ -93,10 +93,12 @@ def audioOutputWpm(
     out["match_key"] = out[file_col].apply(_audio_key)
 
     # ------------------------------------------------------------------
-    # 3) Enrich df_windows with wpm
+    # 3) Enrich df_windows with wpm + debug columns
     # ------------------------------------------------------------------
     df_win = df_windows.copy()
-    df_win["wpm"] = 0.0
+    df_win["num_words"]  = 0
+    df_win["delta_time"] = 0.0
+    df_win["wpm"]        = 0.0
 
     files_with_transcript = 0
 
@@ -110,11 +112,12 @@ def audioOutputWpm(
         for idx in grp.index:
             t_start = df_win.at[idx, "time_window"]
             t_end   = t_start + window_sec
-            words_in_window = sum(
-                s["words"] for s in sentences
-                if t_start <= s["mid"] < t_end
-            )
-            df_win.at[idx, "wpm"] = words_in_window * 60.0 / window_sec
+            matched = [s for s in sentences if t_start <= s["mid"] < t_end]
+            words_in_window  = sum(s["words"] for s in matched)
+            speech_in_window = sum(s["end"] - s["start"] for s in matched)
+            df_win.at[idx, "num_words"]  = words_in_window
+            df_win.at[idx, "delta_time"] = round(speech_in_window, 4)
+            df_win.at[idx, "wpm"]        = words_in_window * 60.0 / window_sec
 
     report = {
         "transcripts_found":     len(transcript_paths),
