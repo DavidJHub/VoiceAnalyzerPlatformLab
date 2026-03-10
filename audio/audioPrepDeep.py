@@ -49,7 +49,12 @@ def audioOutputWpm(
         return os.path.basename(fname).split(".")[0]
 
     def _parse_sentences(path: str) -> List[Dict[str, Any]]:
-        """Extract sentences list from Deepgram-style transcript JSON."""
+        """Extract sentences from Deepgram-style transcript JSON.
+
+        Actual path:
+          results -> channels[] -> alternatives[]
+            -> paragraphs -> paragraphs[] -> sentences[]
+        """
         with open(path, "r", encoding="utf-8") as fh:
             data = _json.load(fh)
         out: List[Dict[str, Any]] = []
@@ -59,17 +64,19 @@ def audioOutputWpm(
             return out
         for ch in channels:
             for alt in ch.get("alternatives", []):
-                for s in alt.get("sentences", []):
-                    text = s.get("text", "")
-                    try:
-                        start = float(s["start"])
-                        end   = float(s["end"])
-                    except (KeyError, TypeError, ValueError):
-                        continue
-                    words = len(text.split())
-                    if words > 0 and end > start:
-                        out.append({"words": words, "start": start, "end": end,
-                                    "mid": (start + end) * 0.5})
+                paragraphs_block = alt.get("paragraphs", {})
+                for para in paragraphs_block.get("paragraphs", []):
+                    for s in para.get("sentences", []):
+                        text = s.get("text", "")
+                        try:
+                            start = float(s["start"])
+                            end   = float(s["end"])
+                        except (KeyError, TypeError, ValueError):
+                            continue
+                        words = len(text.split())
+                        if words > 0 and end > start:
+                            out.append({"words": words, "start": start, "end": end,
+                                        "mid": (start + end) * 0.5})
         return out
 
     # ------------------------------------------------------------------
