@@ -301,13 +301,6 @@ def main(PREFIX,days_ago,mode,oparam1=None):
     getTranscriptParagraphsJsonHighlights(final_json_route, permitidas, no_perm)
 
     # ---------------------------------------------------------------
-    # MEDIR VELOCIDAD Y VOLUMEN DE MAC/PRECIO
-    # ---------------------------------------------------------------
-    MAT_CALLS_CAMPAIGN['velocity_classification_macs']=MAT_CALLS_CAMPAIGN['topic_words_p_m_macs'].apply(lambda x: measure_speed_classification(x))
-    MAT_CALLS_CAMPAIGN['velocity_classification_prices']=MAT_CALLS_CAMPAIGN['topic_words_p_m_prices'].apply(lambda x: measure_speed_classification(x))
-
-
-    # ---------------------------------------------------------------
     # EVALUACIÓN DE CONCIENCIA DE VENTA
     # Se realiza luego de determinar la ruta de transcritos 'final_json_route'
     # y antes de convertir MAT_CALLS_CAMPAIGN a Excel

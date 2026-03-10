@@ -506,6 +506,105 @@ def _score_d5_audio(row: pd.Series) -> float:
 _SILENCE_DB_THRESHOLD = -50.0
 
 
+def _build_windows_index(df_windows: pd.DataFrame) -> dict:
+    """
+    Construye un índice {file_key: (times_array, wpm_array, vols_array)}
+    desde df_windows para lookups O(log n) por timestamp.
+
+    file_key = nombre de archivo sin extensión (match con MAT file_name).
+    times_array = np.ndarray de enteros (fin de cada ventana de 1 s, en segundos).
+    wpm_array   = np.ndarray de WPM por ventana (alineado con times_array).
+    vols_array  = np.ndarray de dBFS por ventana (alineado con times_array).
+    """
+    import bisect
+
+    def _key(fname: str) -> str:
+        return os.path.splitext(os.path.basename(str(fname)))[0]
+
+    index: dict = {}
+    for _, row in df_windows.iterrows():
+        t5  = row.get('times_5s') or row.get('times')
+        w5  = row.get('wpm_5s')
+        v5  = row.get('vols_5s') or row.get('vols')
+        if t5 is None or w5 is None:
+            continue
+        t_arr = np.asarray(t5, dtype=float)
+        w_arr = np.asarray(w5, dtype=float)
+        v_arr = np.asarray(v5, dtype=float) if v5 is not None else np.full_like(t_arr, np.nan)
+        if len(t_arr) == 0:
+            continue
+        index[_key(row['file_name'])] = (t_arr, w_arr, v_arr)
+
+    return index
+
+
+def _wpm_at_time(index: dict, file_name: str, time_sec) -> float:
+    """
+    Devuelve el WPM de la ventana que contiene `time_sec` para `file_name`.
+    Usa búsqueda binaria sobre el array de tiempos de fin de ventana.
+    Retorna NaN si el archivo no está en el índice o el tiempo es inválido.
+    """
+    import bisect
+
+    if time_sec is None or (isinstance(time_sec, float) and np.isnan(time_sec)):
+        return np.nan
+    key = os.path.splitext(os.path.basename(str(file_name)))[0]
+    if key not in index:
+        return np.nan
+    t_arr, w_arr, _ = index[key]
+    # times_5s son los fines de ventana → ventana i cubre (t[i-1], t[i]]
+    # bisect_left da el primer índice donde t_arr[i] >= time_sec
+    idx = int(np.searchsorted(t_arr, float(time_sec), side='left'))
+    if idx >= len(w_arr):
+        idx = len(w_arr) - 1
+    return float(w_arr[idx])
+
+
+def _enrich_with_topic_velocity(mat: pd.DataFrame,
+                                 df_windows: pd.DataFrame) -> pd.DataFrame:
+    """
+    Agrega a MAT la velocidad de habla (WPM) y su clasificación categórica
+    en los momentos exactos donde se dijo el MAC y el PRECIO, usando las
+    ventanas de tiempo pre-computadas por audioOutputWpm.
+
+    Requiere en MAT las columnas:
+      - file_name
+      - time_centroid_macs   (tiempo central en segundos del mejor fragmento MAC)
+      - time_centroid_prices (tiempo central en segundos del mejor fragmento PRECIO)
+
+    Columnas que se agregan
+    -----------------------
+    wpm_at_mac                 : WPM del agente en la ventana donde se dijo el MAC
+    wpm_at_price               : WPM del agente en la ventana donde se dijo el PRECIO
+    velocity_classification_macs   : categoría de velocidad MAC  ("low"/"normal"/"high")
+    velocity_classification_prices : categoría de velocidad PRECIO ("low"/"normal"/"high")
+    """
+    vel_cols = ('wpm_at_mac', 'wpm_at_price',
+                'velocity_classification_macs', 'velocity_classification_prices')
+
+    if df_windows is None or df_windows.empty:
+        for col in vel_cols:
+            if col not in mat.columns:
+                mat[col] = np.nan
+        return mat
+
+    index = _build_windows_index(df_windows)
+
+    mat['wpm_at_mac'] = mat.apply(
+        lambda r: _wpm_at_time(index, r['file_name'], r.get('time_centroid_macs')), axis=1
+    )
+    mat['wpm_at_price'] = mat.apply(
+        lambda r: _wpm_at_time(index, r['file_name'], r.get('time_centroid_prices')), axis=1
+    )
+    mat['velocity_classification_macs'] = mat['wpm_at_mac'].apply(
+        lambda x: measure_speed_classification(x) if pd.notna(x) else None
+    )
+    mat['velocity_classification_prices'] = mat['wpm_at_price'].apply(
+        lambda x: measure_speed_classification(x) if pd.notna(x) else None
+    )
+    return mat
+
+
 def _enrich_with_audio_windows(mat: pd.DataFrame,
                                 df_windows: pd.DataFrame) -> pd.DataFrame:
     """
@@ -759,11 +858,19 @@ def score_camp(campaign_directory, campaign_id, TMO, topics_combined_df,
     AllCallPricesMarked['price_warn'] = AllCallPricesMarked['best_mac_likelihood'] < TOLERANCE
 
     # ── Merge de todos los datos en MAT ──────────────────────────────────────
-    MAT_w = pd.merge(MAT, AllCallMacsMarked[['file_name', 'best_mac_likelihood',
-                                              'best_mac_window', 'times_said', 'mac_warn']],
+    # time_centroid se incluye para el lookup de velocidad por ventana de audio.
+    mac_merge_cols   = ['file_name', 'best_mac_likelihood', 'best_mac_window',
+                        'times_said', 'mac_warn', 'time_centroid']
+    price_merge_cols = ['file_name', 'best_mac_likelihood', 'times_said',
+                        'price_warn', 'time_centroid']
+
+    # Filtrar solo las columnas que realmente existen en cada DataFrame
+    mac_merge_cols   = [c for c in mac_merge_cols   if c in AllCallMacsMarked.columns]
+    price_merge_cols = [c for c in price_merge_cols if c in AllCallPricesMarked.columns]
+
+    MAT_w = pd.merge(MAT, AllCallMacsMarked[mac_merge_cols],
                      on='file_name', how='left')
-    MAT_w = pd.merge(MAT_w, AllCallPricesMarked[['file_name', 'best_mac_likelihood',
-                                                   'times_said', 'price_warn']],
+    MAT_w = pd.merge(MAT_w, AllCallPricesMarked[price_merge_cols],
                      on='file_name', how='left', suffixes=('_macs', '_prices'))
     MAT_w = pd.merge(MAT_w, AllCallMVDs[['file_name', 'mvd']],   on='file_name', how='left')
     MAT_w = pd.merge(MAT_w, AllCallTERMS[['file_name', 'terms']], on='file_name', how='left')
@@ -792,6 +899,12 @@ def score_camp(campaign_directory, campaign_id, TMO, topics_combined_df,
     # silence_ratio, overlap_ratio_in_speech y vol_mean derivados de las
     # ventanas de 1 s calculadas por audioPrepDeep.main_process_batch.
     MAT_volumes = _enrich_with_audio_windows(MAT_w, df_windows)
+
+    # ── Velocidad de habla en los momentos de MAC y PRECIO ───────────────────
+    # time_centroid_macs / time_centroid_prices provienen del merge anterior.
+    # La búsqueda en df_windows devuelve el WPM de la ventana de 1 s que
+    # contiene ese instante; measure_speed_classification lo categoriza.
+    MAT_volumes = _enrich_with_topic_velocity(MAT_volumes, df_windows)
 
     # ── Enriquecer con flags de compliance por tópico ────────────────────────
     MAT_volumes = _enrich_with_compliance_flags(MAT_volumes, values_per_topic_for_all_convs)
