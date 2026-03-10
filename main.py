@@ -248,6 +248,7 @@ def main(PREFIX,days_ago,mode,oparam1=None):
                                 )
     summary_excel_path = os.path.join(campaign_directory, "misc/audio_outputs_test.xlsx")
     df_windows_wpm.to_excel(summary_excel_path, index=False)
+    audioData_vel.to_excel(os.path.join(campaign_directory, "misc/audio_windows_test.xlsx"), index=False)
 
     # ---------------------------------------------------------------
     # SETUP DE CALIFICACIÓN (EN MODO GPU INSTANCE ESTA PARTE SE HACE EXTERNA A LA EC2 Y LOCAL)
