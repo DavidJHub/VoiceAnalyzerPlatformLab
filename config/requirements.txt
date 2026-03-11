@@ -64,5 +64,7 @@ wasabi==1.1.2
 openai
 
 # -------- segmentation extras --------
-torchcrf>=1.1.0
+pytorch-crf
 scipy>=1.13.0
+datasets==4.7.0
+accelerate>=0.21.0
