@@ -538,6 +538,43 @@ def _build_windows_index(df_windows: pd.DataFrame) -> dict:
     return index
 
 
+def _vol_at_time(index: dict, file_name: str, time_sec) -> float:
+    """
+    Devuelve el volumen (dBFS) de la ventana que contiene `time_sec`.
+    Reutiliza el índice construido por _build_windows_index.
+    Retorna NaN si el archivo no está en el índice o el tiempo es inválido.
+    """
+    if time_sec is None or (isinstance(time_sec, float) and np.isnan(time_sec)):
+        return np.nan
+    key = os.path.splitext(os.path.basename(str(file_name)))[0]
+    if key not in index:
+        return np.nan
+    t_arr, _, v_arr = index[key]
+    idx = int(np.searchsorted(t_arr, float(time_sec), side='left'))
+    if idx >= len(v_arr):
+        idx = len(v_arr) - 1
+    val = float(v_arr[idx])
+    return val if np.isfinite(val) else np.nan
+
+
+def measure_volume_classification(db_value: float) -> str:
+    """
+    Clasifica el volumen en dBFS en tres categorías.
+
+    Umbrales calibrados para audio de voz procesado a 8 kHz / −23 LUFS:
+      high  : ≥ −20 dBFS  (voz alta o muy próxima al micrófono)
+      mid   : −35 a −20   (voz normal, rango conversacional óptimo)
+      low   : < −35 dBFS  (voz baja, posible problema de captación)
+    """
+    if db_value is None or (isinstance(db_value, float) and np.isnan(db_value)):
+        return 'unknown'
+    if db_value >= -20.0:
+        return 'high'
+    if db_value >= -35.0:
+        return 'mid'
+    return 'low'
+
+
 def _wpm_at_time(index: dict, file_name: str, time_sec) -> float:
     """
     Devuelve el WPM de la ventana que contiene `time_sec` para `file_name`.
@@ -574,22 +611,31 @@ def _enrich_with_topic_velocity(mat: pd.DataFrame,
 
     Columnas que se agregan
     -----------------------
-    wpm_at_mac                 : WPM del agente en la ventana donde se dijo el MAC
-    wpm_at_price               : WPM del agente en la ventana donde se dijo el PRECIO
-    velocity_classification_macs   : categoría de velocidad MAC  ("low"/"normal"/"high")
-    velocity_classification_prices : categoría de velocidad PRECIO ("low"/"normal"/"high")
+    wpm_at_mac                 : WPM en la ventana del instante MAC
+    wpm_at_price               : WPM en la ventana del instante PRECIO
+    velocity_classification_macs   : categoría de velocidad MAC  ("low"/"mid"/"high")
+    velocity_classification_prices : categoría de velocidad PRECIO
+    volume_db_mac              : volumen (dBFS) en la ventana del instante MAC
+    volume_db_price            : volumen (dBFS) en la ventana del instante PRECIO
+    volume_classification_mac  : categoría de volumen MAC  ("low"/"mid"/"high"/"unknown")
+    volume_classification_price: categoría de volumen PRECIO
     """
-    vel_cols = ('wpm_at_mac', 'wpm_at_price',
-                'velocity_classification_macs', 'velocity_classification_prices')
+    new_cols = (
+        'wpm_at_mac', 'wpm_at_price',
+        'velocity_classification_macs', 'velocity_classification_prices',
+        'volume_db_mac', 'volume_db_price',
+        'volume_classification_mac', 'volume_classification_price',
+    )
 
     if df_windows is None or df_windows.empty:
-        for col in vel_cols:
+        for col in new_cols:
             if col not in mat.columns:
                 mat[col] = np.nan
         return mat
 
     index = _build_windows_index(df_windows)
 
+    # ── WPM en el instante de MAC / PRECIO ───────────────────────────────────
     mat['wpm_at_mac'] = mat.apply(
         lambda r: _wpm_at_time(index, r['file_name'], r.get('time_centroid_macs')), axis=1
     )
@@ -602,6 +648,17 @@ def _enrich_with_topic_velocity(mat: pd.DataFrame,
     mat['velocity_classification_prices'] = mat['wpm_at_price'].apply(
         lambda x: measure_speed_classification(x) if pd.notna(x) else None
     )
+
+    # ── Volumen (dBFS) en el instante de MAC / PRECIO ────────────────────────
+    mat['volume_db_mac'] = mat.apply(
+        lambda r: _vol_at_time(index, r['file_name'], r.get('time_centroid_macs')), axis=1
+    )
+    mat['volume_db_price'] = mat.apply(
+        lambda r: _vol_at_time(index, r['file_name'], r.get('time_centroid_prices')), axis=1
+    )
+    mat['volume_classification_mac'] = mat['volume_db_mac'].apply(measure_volume_classification)
+    mat['volume_classification_price'] = mat['volume_db_price'].apply(measure_volume_classification)
+
     return mat
 
 

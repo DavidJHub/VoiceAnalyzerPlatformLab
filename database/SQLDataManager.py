@@ -788,6 +788,10 @@ def getAgentStats(LlamadasPorAgente: pd.DataFrame) -> pd.DataFrame:
     Returns:
         pd.DataFrame: DataFrame con estadísticas agregadas por agente.
     """
+    def _mode_or_first(x):
+        m = x.dropna().mode()
+        return m.iloc[0] if not m.empty else None
+
     df_concatenado_agentes_unicos = LlamadasPorAgente.groupby('id_igs').agg(
         CONFIDENCE=('confidence', 'mean'),
         TMO=('TMO', 'mean'),
@@ -798,10 +802,10 @@ def getAgentStats(LlamadasPorAgente: pd.DataFrame) -> pd.DataFrame:
         SCORE=('score', 'mean'),
         MAC_SCORE=('best_mac_likelihood_macs', 'mean'),
         PRICE_SCORE=('best_mac_likelihood_prices', 'mean'),
-        words_p_m=('topic_words_p_m_macs', 'mean'),
+        words_p_m=('wpm_at_mac', 'mean'),
         volume_rms=('volume_db_mac', 'mean'),
-        volume_classification=('volume_classification_mac', lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0]),
-        velocity_classification=('velocity_classification_macs', lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0]),
+        volume_classification=('volume_classification_mac', _mode_or_first),
+        velocity_classification=('velocity_classification_macs', _mode_or_first),
         DATE=('DATE_TIME', 'last'),
     ).reset_index().apply(lambda x: x.reset_index(drop=True)).reset_index(drop=True)
     df_concatenado_agentes_unicos = df_concatenado_agentes_unicos.drop_duplicates(subset='id_igs')
