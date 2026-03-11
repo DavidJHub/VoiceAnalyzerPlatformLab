@@ -10,32 +10,43 @@ from setup.MemorySetup import download_memory_json
 from database.S3Loader import renombrar_archivos_s3, download_audio_files, download_audio_files_fixed_route
 from utils.VapFunctions import  clean_column_blank_regex, get_campaign_parameters
 
-logging.basicConfig(level=logging.ERROR)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 def obtener_inventario():
     """
     Obtiene el inventario de campañas desde la base de datos.
     """
-    conexion   = dbcfg.conectar(HOST=dbcfg.HOST_DB_VAP,  
-                                  DATABASE=dbcfg.DB_NAME_VAP,  
-                                  USERNAME=dbcfg.USER_DB_VAP,  
+    conexion = None
+    cursor = None
+    try:
+        conexion = dbcfg.conectar(HOST=dbcfg.HOST_DB_VAP,
+                                  DATABASE=dbcfg.DB_NAME_VAP,
+                                  USERNAME=dbcfg.USER_DB_VAP,
                                   PASSWORD=dbcfg.PASSWORD_DB_VAP)
-    cursor= conexion.cursor()
-    if cursor:
-        query = "SELECT * FROM marketing_campaigns"
-        cursor.execute(query)
-        column_names = [i[0] for i in cursor.description]
-        data = cursor.fetchall()
-        df_inventory = pd.DataFrame(data, columns=column_names)
-        conexion.close()
-        cursor.close()
-        return clean_column_blank_regex(df_inventory, 'path')
-    else:
+        cursor = conexion.cursor()
+        if cursor:
+            query = "SELECT * FROM marketing_campaigns"
+            cursor.execute(query)
+            column_names = [i[0] for i in cursor.description]
+            data = cursor.fetchall()
+            df_inventory = pd.DataFrame(data, columns=column_names)
+            return clean_column_blank_regex(df_inventory, 'path')
+        else:
+            logger.warning("No se pudo obtener el cursor de la base de datos.")
+            return pd.DataFrame()
+    except Exception as e:
+        logger.error(f"Error al obtener inventario: {e}")
         return pd.DataFrame()
+    finally:
+        if cursor:
+            cursor.close()
+        if conexion:
+            conexion.close()
 
 
 import boto3
-import os
+
 
 def fix_audio_filenames_s3(
     bucket: str,
@@ -272,7 +283,7 @@ def campaign_setup(path_campania,mapping_camps_expanded,campaign_parameters,days
 
 def campaign_setup_manual_route(path_campania,mapping_camps_expanded,campaign_parameters,days_ago=0,oparam1=None):
     """
-    Realiza el setup de la campaña recibiendo los parámetros de ejecución del main y 
+    Realiza el setup de la campaña recibiendo los parámetros de ejecución del main y
     retorna los parámetros de la campaña: Sigue los pasos mostrados a continuación:
     1. Obtener el inventario de campañas desde la base de datos.
     2. Extraer los parámetros de la campaña a partir del PREFIX.
@@ -282,11 +293,11 @@ def campaign_setup_manual_route(path_campania,mapping_camps_expanded,campaign_pa
     6. Aisla los audios vacíos (menores a 120 KB) en la carpeta "isolated".
     """
     campaign_directory = 'process/' + path_campania + '/'
-    print(campaign_parameters)
+    logger.info(f"Parámetros de campaña: {campaign_parameters}")
     if campaign_parameters is not None:
         matrix_path = campaign_directory + 'misc/'
         save_dict_as_json(default_json_structure, matrix_path + "empty_transcript.json")
-        S3_PATH = route
+        S3_PATH = campaign_parameters['s3'].split('s3iahub.igs' + '/')[1]
         reconstruct_folder =campaign_directory+"/"+path_campania +'_RECONS' + "/"
         if not os.path.exists(reconstruct_folder):
             os.makedirs(reconstruct_folder)
