@@ -13,6 +13,7 @@ load_dotenv()
 
 import torch
 from auditableSelector.main import classify_audio_quality
+from database.ModelSelector import resolve_model_for_sponsor
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
 from config.logger import logger
@@ -196,6 +197,36 @@ def main(PREFIX,days_ago,mode,oparam1=None):
     id_graf = obtener_o_generar_id_graf(conexion, id_campania_num, id_sponsor)
     print(f"ID DE CAMPAÑA: {camp_id}")
 
+    # ---------------------------------------------------------------
+    # RESOLUCIÓN DEL MODELO DE SEGMENTACIÓN POR SPONSOR
+    # Se consulta vap_models para el modelo personalizado más reciente
+    # (preferiblemente tested=1). Si no hay ninguno registrado o la
+    # descarga falla, se usa el modelo global (TEXT_MODEL_DIR /
+    # TIME_PRIORS_JSON), exactamente igual que antes.
+    # ---------------------------------------------------------------
+    print(f"RESOLVIENDO MODELO DE SEGMENTACIÓN PARA SPONSOR {id_sponsor}...")
+    sponsor_model_dir, sponsor_time_priors = resolve_model_for_sponsor(
+        conexion, int(id_sponsor)
+    )
+
+    # Fallback explícito al modelo general si no se obtuvo un modelo por sponsor.
+    # Esto garantiza el comportamiento original cuando vap_models no tiene entrada.
+    _global_model_dir   = os.getenv("TEXT_MODEL_DIR")
+    _global_time_priors = os.getenv("TIME_PRIORS_JSON")
+
+    if not sponsor_model_dir:
+        sponsor_model_dir = _global_model_dir
+        print(f"SIN MODELO PERSONALIZADO. Usando modelo global: {sponsor_model_dir}")
+    else:
+        print(f"MODELO PERSONALIZADO SELECCIONADO: {sponsor_model_dir}")
+
+    # time_priors puede venir como None aunque el modelo exista (no incluido en S3).
+    # En ese caso usar el time_priors.json del modelo global.
+    if not sponsor_time_priors:
+        sponsor_time_priors = _global_time_priors
+        if sponsor_time_priors:
+            print(f"time_priors.json usando variable de entorno: {sponsor_time_priors}")
+
     # Generar directorio local
 
     processed_output_directory = campaign_directory + "processed/"
@@ -282,7 +313,9 @@ def main(PREFIX,days_ago,mode,oparam1=None):
         os.makedirs(campaign_directory+PREFIX+'_RECONS', exist_ok=True)
     (MAT_CALLS_CAMPAIGN,STATISTICS,MAT_COMPLETE_TOPICS,all_musnt_keywords,
     topics_stats_convs_scores,topics_stats_convs)=score_camp(campaign_directory, PREFIX, TMO,topics_df,
-                                                             df_windows=audioData_vel)
+                                                             df_windows=audioData_vel,
+                                                             model_dir=sponsor_model_dir,
+                                                             time_priors_json=sponsor_time_priors)
 
     AGENTES_DB=config_agents(camp_id)
     AGENTES_DB.to_excel(campaign_directory+"misc/AGENTES_DB.xlsx")

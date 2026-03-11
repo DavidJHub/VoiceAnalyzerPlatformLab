@@ -3,6 +3,10 @@ import os
 import re
 import json
 import shutil
+import logging
+from dataclasses import dataclass, field
+from typing import Dict, Optional, Callable, Tuple
+
 import numpy as np
 import pandas as pd
 import torch
@@ -11,6 +15,8 @@ from dotenv import load_dotenv
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+
+logger = logging.getLogger(__name__)
 
 # =============================
 # CONFIG
@@ -164,42 +170,149 @@ def normalize_priors_labels(meta):
     return meta
 
 
-# ---- module-level load ----
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-tokenizer, text_model, id2label = load_text_model(TEXT_MODEL_DIR, device)
-TIME_META = load_time_priors(TIME_PRIORS_JSON)
-TIME_META = normalize_priors_labels(TIME_META)
+# =============================
+# MODEL CONTEXT (multi-model support)
+# =============================
 
-# Issue #3: override rel_time_bin with version derived from stored thresholds
-rel_time_bin = _make_rel_time_bin_fn(TIME_META["_time_bin_thresholds"])
+@dataclass
+class ModelContext:
+    """
+    Encapsula todo el estado de un modelo de segmentación cargado.
+    Permite usar múltiples modelos (uno por sponsor) en el mismo proceso.
+    """
+    tokenizer:      object
+    text_model:     object
+    id2label:       Dict[int, str]
+    TIME_META:      dict
+    TIME_LABELS:    list
+    LABEL2IDX_TIME: Dict[str, int]
+    TEXT_ID2LABEL:  Dict[int, str]
+    TEXT_LABEL2ID:  Dict[str, int]
+    ALPHA:          float
+    BETA:           float
+    GAMMA:          float
+    PRIOR_Y:        np.ndarray
+    CRF_DECODER:    object          # CRFSequenceDecoder o None
+    rel_time_bin:   Callable        # función (rel: float) -> str
+    device:         torch.device
+    model_dir:      str             # ruta local del modelo (para logging)
 
-TIME_LABELS      = TIME_META["labels"]
-LABEL2IDX_TIME   = {lab: i for i, lab in enumerate(TIME_LABELS)}
-TEXT_ID2LABEL    = id2label
-TEXT_LABEL2ID    = {v: k for k, v in TEXT_ID2LABEL.items()}
 
-missing_in_text = [lab for lab in TIME_LABELS if lab not in TEXT_LABEL2ID]
-if missing_in_text:
-    raise ValueError(
-        "Tus time priors tienen labels que no existen en el modelo texto. "
-        f"Faltan en texto: {missing_in_text}\n"
-        f"Labels en texto: {sorted(list(TEXT_LABEL2ID.keys()))[:30]}..."
+# Cache global: clave = (model_dir, time_priors_json)
+_CONTEXT_CACHE: Dict[Tuple[str, str], ModelContext] = {}
+
+
+def _build_context(model_dir: str, time_priors_json: str) -> ModelContext:
+    """Carga un modelo completo desde disco y devuelve un ModelContext."""
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    tok, mdl, i2l = load_text_model(model_dir, dev)
+
+    meta = load_time_priors(time_priors_json)
+    meta = normalize_priors_labels(meta)
+
+    rtb = _make_rel_time_bin_fn(meta["_time_bin_thresholds"])
+    t_labels = meta["labels"]
+    txt_i2l  = i2l
+    txt_l2i  = {v: k for k, v in txt_i2l.items()}
+
+    missing = [lab for lab in t_labels if lab not in txt_l2i]
+    if missing:
+        raise ValueError(
+            "time_priors tiene labels que no existen en el modelo texto. "
+            f"Faltan: {missing}\n"
+            f"Labels en texto: {sorted(list(txt_l2i.keys()))[:30]}..."
+        )
+
+    crf = None
+    if meta.get("crf_params"):
+        try:
+            from segmentationModel.crfDecoder import CRFSequenceDecoder
+            crf = CRFSequenceDecoder.from_dict(meta["crf_params"])
+            logger.info("[CRF] Decoder cargado (%d tags, fitted=%s)", len(t_labels), crf._fitted)
+        except Exception as exc:
+            logger.warning("[CRF] No se pudo cargar el decoder: %s. Usando argmax.", exc)
+
+    return ModelContext(
+        tokenizer      = tok,
+        text_model     = mdl,
+        id2label       = i2l,
+        TIME_META      = meta,
+        TIME_LABELS    = t_labels,
+        LABEL2IDX_TIME = {lab: i for i, lab in enumerate(t_labels)},
+        TEXT_ID2LABEL  = txt_i2l,
+        TEXT_LABEL2ID  = txt_l2i,
+        ALPHA          = meta["_alpha"],
+        BETA           = meta["_beta"],
+        GAMMA          = meta["_gamma"],
+        PRIOR_Y        = meta["_prior_y"],
+        CRF_DECODER    = crf,
+        rel_time_bin   = rtb,
+        device         = dev,
+        model_dir      = model_dir,
     )
 
-ALPHA   = TIME_META["_alpha"]
-BETA    = TIME_META["_beta"]
-GAMMA   = TIME_META["_gamma"]
-PRIOR_Y = TIME_META["_prior_y"]       # shape [n_labels], in TIME_LABELS order
 
-# Issue #6: load CRF decoder from time priors (None if not present / not fitted)
-CRF_DECODER = None
-if TIME_META.get("crf_params"):
-    try:
-        from segmentationModel.crfDecoder import CRFSequenceDecoder
-        CRF_DECODER = CRFSequenceDecoder.from_dict(TIME_META["crf_params"])
-        print(f"[CRF] Decoder loaded ({len(TIME_LABELS)} tags, fitted={CRF_DECODER._fitted})")
-    except Exception as e:
-        print(f"[WARNING] CRF decoder could not be loaded: {e}. Falling back to argmax.")
+def get_or_load_context(
+    model_dir: Optional[str] = None,
+    time_priors_json: Optional[str] = None,
+) -> ModelContext:
+    """
+    Devuelve el ModelContext para la combinación (model_dir, time_priors_json).
+
+    Si los parámetros son None se usan las variables de entorno TEXT_MODEL_DIR /
+    TIME_PRIORS_JSON (comportamiento original del pipeline antes de modelos por sponsor).
+    Los env vars se re-leen en tiempo de ejecución para no depender del momento
+    de importación del módulo.  El contexto se cachea en memoria para evitar
+    recargas en el mismo proceso.
+    """
+    # Re-leer env vars en tiempo de ejecución como fallback.
+    # Esto cubre el caso en que el módulo fue importado antes de que load_dotenv()
+    # cargara los valores (ej. módulo-nivel TEXT_MODEL_DIR podría ser None).
+    mdir = model_dir      or os.getenv("TEXT_MODEL_DIR") or TEXT_MODEL_DIR
+    tpj  = time_priors_json or os.getenv("TIME_PRIORS_JSON") or TIME_PRIORS_JSON
+
+    if not mdir:
+        raise ValueError(
+            "No se encontró modelo de segmentación. "
+            "Registra el modelo en vap_models o define la variable de entorno TEXT_MODEL_DIR."
+        )
+    if not tpj:
+        raise ValueError(
+            "No se encontró time_priors.json. "
+            "Coloca el archivo dentro del directorio del modelo o define TIME_PRIORS_JSON."
+        )
+
+    cache_key = (mdir, tpj)
+    if cache_key not in _CONTEXT_CACHE:
+        logger.info("[fittingDeep] Cargando modelo desde: %s", mdir)
+        _CONTEXT_CACHE[cache_key] = _build_context(mdir, tpj)
+        logger.info("[fittingDeep] Modelo cargado y cacheado: %s", mdir)
+
+    return _CONTEXT_CACHE[cache_key]
+
+
+# ---- module-level load (modelo por defecto desde env vars) ----
+# Se carga de forma lazy al primer uso para evitar errores en entornos donde
+# TEXT_MODEL_DIR no está configurado pero se importa el módulo.
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+_default_context: Optional[ModelContext] = None
+
+def _get_default_context() -> ModelContext:
+    """Carga (si no está cacheado) y devuelve el contexto del modelo por defecto."""
+    global _default_context
+    if _default_context is None:
+        _default_context = get_or_load_context(TEXT_MODEL_DIR, TIME_PRIORS_JSON)
+    return _default_context
+
+
+# ---------------------------------------------------------------------------
+# Helper: devuelve un atributo del contexto por defecto (lazy).
+# Usado únicamente por código legacy que acceda a estos nombres en el módulo.
+# ---------------------------------------------------------------------------
+def _ctx() -> ModelContext:
+    """Devuelve el contexto del modelo por defecto, cargándolo si es necesario."""
+    return _get_default_context()
 
 
 # =============================
@@ -229,10 +342,11 @@ def _mmss(x):
     return f"{mm:02d}:{ss:02d}"
 
 
-def build_tail(t_mid, conv_dur):
+def build_tail(t_mid, conv_dur, ctx: Optional["ModelContext"] = None):
     rel = (t_mid / conv_dur) if (conv_dur and not np.isnan(conv_dur) and conv_dur > 0) else np.nan
     rel_str = f"{rel:.2f}" if isinstance(rel, float) and not np.isnan(rel) else "UNK"
-    bin_tag = rel_time_bin(rel)
+    _rtb = (ctx.rel_time_bin if ctx is not None else _ctx().rel_time_bin)
+    bin_tag = _rtb(rel)
     t_tag   = _mmss(t_mid)
     return f"[rt={rel_str}][bin={bin_tag}][t={t_tag}]"
 
@@ -269,7 +383,8 @@ def apply_time_fusion(text_probs_time_order: np.ndarray,
                       time_bin_str: str,
                       rel_time_val: float,
                       gamma: float = 0.0,
-                      prior_y: np.ndarray = None) -> np.ndarray:
+                      prior_y: np.ndarray = None,
+                      ctx: Optional["ModelContext"] = None) -> np.ndarray:
     """
     Fuses text-model probabilities with temporal priors in log-space:
 
@@ -284,14 +399,20 @@ def apply_time_fusion(text_probs_time_order: np.ndarray,
         rel_time_val          : relative position in [0..1] or NaN.
         gamma                 : weight for the label-frequency prior term.
         prior_y               : shape [C] empirical label probabilities from training.
+        ctx                   : ModelContext a usar. Si None usa el modelo por defecto.
 
     Returns:
         np.ndarray shape [C], fused and renormalised probabilities.
     """
-    eps     = TIME_META["_eps"]
-    prob_tb = TIME_META["prob_time_bin_given_y"]
-    prob_rb = TIME_META["prob_relbin_given_y"]
-    rel_bins = TIME_META["rel_bins"]
+    _meta     = ctx.TIME_META    if ctx is not None else _ctx().TIME_META
+    _t_labels = ctx.TIME_LABELS  if ctx is not None else _ctx().TIME_LABELS
+    _alpha    = ctx.ALPHA        if ctx is not None else _ctx().ALPHA
+    _beta     = ctx.BETA         if ctx is not None else _ctx().BETA
+
+    eps      = _meta["_eps"]
+    prob_tb  = _meta["prob_time_bin_given_y"]
+    prob_rb  = _meta["prob_relbin_given_y"]
+    rel_bins = _meta["rel_bins"]
 
     tb = ("unknown"
           if (time_bin_str is None or (isinstance(time_bin_str, float) and np.isnan(time_bin_str)))
@@ -300,13 +421,13 @@ def apply_time_fusion(text_probs_time_order: np.ndarray,
 
     logp = np.log(np.clip(text_probs_time_order, eps, 1.0))
 
-    for i, y in enumerate(TIME_LABELS):
+    for i, y in enumerate(_t_labels):
         p_tb = prob_tb[y].get(tb, prob_tb[y].get("unknown", 1e-6))
-        logp[i] += ALPHA * np.log(max(float(p_tb), eps))
+        logp[i] += _alpha * np.log(max(float(p_tb), eps))
 
         if rb >= 0:
             p_rb = prob_rb[y][rb]
-            logp[i] += BETA * np.log(max(float(p_rb), eps))
+            logp[i] += _beta * np.log(max(float(p_rb), eps))
 
         if gamma != 0.0 and prior_y is not None:
             logp[i] += gamma * np.log(max(float(prior_y[i]), eps))
@@ -362,28 +483,44 @@ def build_word_timestamps(df_conversation: pd.DataFrame):
     return word_timeline
 
 
-def predict_text_probs(fragment_text: str, max_length: int = MAX_LENGTH) -> np.ndarray:
+def predict_text_probs(
+    fragment_text: str,
+    max_length: int = MAX_LENGTH,
+    ctx: Optional["ModelContext"] = None,
+) -> np.ndarray:
     """
     Runs the text model and returns a probability vector in TIME_LABELS order.
+
+    Args:
+        fragment_text : text fragment to classify.
+        max_length    : tokeniser max length.
+        ctx           : ModelContext a usar. Si None usa el modelo por defecto.
     """
+    _ctx_use    = ctx if ctx is not None else _ctx()
+    _tok        = _ctx_use.tokenizer
+    _mdl        = _ctx_use.text_model
+    _dev        = _ctx_use.device
+    _t_labels   = _ctx_use.TIME_LABELS
+    _txt_l2i    = _ctx_use.TEXT_LABEL2ID
+
     processed = preprocess_text_identity(fragment_text)
-    inputs = tokenizer(
+    inputs = _tok(
         processed,
         truncation=True,
         padding="max_length",
         max_length=max_length,
         return_tensors="pt",
     )
-    inputs = {k: v.to(device) for k, v in inputs.items()}
+    inputs = {k: v.to(_dev) for k, v in inputs.items()}
 
     with torch.no_grad():
-        outputs = text_model(**inputs)
+        outputs = _mdl(**inputs)
         probs   = torch.softmax(outputs.logits, dim=1).cpu().numpy()[0]
 
     # Reorder to TIME_LABELS
-    probs_time_order = np.zeros(len(TIME_LABELS), dtype=np.float64)
-    for i, lab in enumerate(TIME_LABELS):
-        probs_time_order[i] = probs[TEXT_LABEL2ID[lab]]
+    probs_time_order = np.zeros(len(_t_labels), dtype=np.float64)
+    for i, lab in enumerate(_t_labels):
+        probs_time_order[i] = probs[_txt_l2i[lab]]
 
     s = probs_time_order.sum()
     if s > 0:
@@ -391,30 +528,42 @@ def predict_text_probs(fragment_text: str, max_length: int = MAX_LENGTH) -> np.n
     return probs_time_order
 
 
-def classify_fragment(fragment_text: str, rel_time_val: float,
-                      time_bin_str: str, max_length: int = MAX_LENGTH) -> dict:
+def classify_fragment(
+    fragment_text: str,
+    rel_time_val: float,
+    time_bin_str: str,
+    max_length: int = MAX_LENGTH,
+    ctx: Optional["ModelContext"] = None,
+) -> dict:
     """
     Classifies a single sliding-window fragment using BERT + time fusion.
     The result dict contains per-label fused probabilities used downstream
     by both argmax (fallback) and the CRF Viterbi decoder.
+
+    Args:
+        ctx : ModelContext a usar. Si None usa el modelo por defecto.
     """
-    probs_text  = predict_text_probs(fragment_text, max_length=max_length)
+    _ctx_use  = ctx if ctx is not None else _ctx()
+    _t_labels = _ctx_use.TIME_LABELS
+
+    probs_text  = predict_text_probs(fragment_text, max_length=max_length, ctx=_ctx_use)
     probs_fused = apply_time_fusion(
         probs_text,
         time_bin_str=time_bin_str,
         rel_time_val=rel_time_val,
-        gamma=GAMMA,
-        prior_y=PRIOR_Y,
+        gamma=_ctx_use.GAMMA,
+        prior_y=_ctx_use.PRIOR_Y,
+        ctx=_ctx_use,
     )
 
     pred_id    = int(np.argmax(probs_fused))
-    pred_label = TIME_LABELS[pred_id]
+    pred_label = _t_labels[pred_id]
 
     result = {
         "predicted_subtag":   pred_label,
         "predicted_cluster":  pred_label,
     }
-    for i, lab in enumerate(TIME_LABELS):
+    for i, lab in enumerate(_t_labels):
         result[lab] = float(probs_fused[i])
 
     return result
@@ -425,12 +574,22 @@ def classify_entire_conversation(
     window_size: int,
     stride: int,
     max_length: int,
+    ctx: Optional["ModelContext"] = None,
 ) -> pd.DataFrame:
     """
     Applies a sliding window over a conversation, classifies each window
     with BERT + time fusion, then (if available) refines the full label
     sequence using CRF Viterbi decoding (Issue #6).
+
+    Args:
+        ctx : ModelContext a usar. Si None usa el modelo por defecto.
     """
+    _ctx_use  = ctx if ctx is not None else _ctx()
+    _rtb      = _ctx_use.rel_time_bin
+    _t_labels = _ctx_use.TIME_LABELS
+    _meta     = _ctx_use.TIME_META
+    _crf      = _ctx_use.CRF_DECODER
+
     word_timeline = build_word_timestamps(df_conversation)
     if not word_timeline:
         return pd.DataFrame(columns=[
@@ -468,14 +627,17 @@ def classify_entire_conversation(
             if (conv_dur and not np.isnan(conv_dur) and conv_dur > 0 and not np.isnan(t_mid))
             else np.nan
         )
-        tb = rel_time_bin(rel)
+        tb = _rtb(rel)
 
         fragment_text = " ".join(w_slice)
         if USE_TEXT_TAIL:
-            tail = build_tail(t_mid, conv_dur)
+            tail = build_tail(t_mid, conv_dur, ctx=_ctx_use)
             fragment_text = f"{fragment_text} {tail}".strip()
 
-        out = classify_fragment(fragment_text, rel_time_val=rel, time_bin_str=tb, max_length=max_length)
+        out = classify_fragment(
+            fragment_text, rel_time_val=rel, time_bin_str=tb,
+            max_length=max_length, ctx=_ctx_use,
+        )
         out.update({
             "text":     fragment_text,
             "start":    start_window,
@@ -493,18 +655,17 @@ def classify_entire_conversation(
         return pd.DataFrame()
 
     # Issue #6: CRF Viterbi decoding over the full window sequence
-    if CRF_DECODER is not None and CRF_DECODER._fitted and len(results) > 1:
-        eps = TIME_META["_eps"]
-        # Emissions: log of fused probabilities in TIME_LABELS order
+    if _crf is not None and _crf._fitted and len(results) > 1:
+        eps = _meta["_eps"]
         log_emissions = np.array([
-            np.log(np.clip([r[lab] for lab in TIME_LABELS], eps, 1.0))
+            np.log(np.clip([r[lab] for lab in _t_labels], eps, 1.0))
             for r in results
         ])  # shape [n_windows, n_labels]
 
-        viterbi_path = CRF_DECODER.decode(log_emissions)
+        viterbi_path = _crf.decode(log_emissions)
 
         for j, r in enumerate(results):
-            best_label = TIME_LABELS[viterbi_path[j]]
+            best_label = _t_labels[viterbi_path[j]]
             r["predicted_subtag"]  = best_label
             r["predicted_cluster"] = best_label
 
@@ -536,9 +697,13 @@ def fit_csv_sliding_transformer(
     window_size: int = WINDOW_SIZE,
     stride: int      = STRIDE,
     max_length: int  = MAX_LENGTH,
+    ctx: Optional["ModelContext"] = None,
 ):
     """
     Classifies a full conversation CSV via sliding window and writes results.
+
+    Args:
+        ctx : ModelContext a usar. Si None usa el modelo por defecto.
     """
     df = pd.read_csv(input_csv, encoding="utf-8")
     required = {"text", "start", "end"}
@@ -548,18 +713,38 @@ def fit_csv_sliding_transformer(
             "(se ignorarán columnas extra como confidence/speaker)."
         )
 
-    classified_df = classify_entire_conversation(df, window_size, stride, max_length)
+    classified_df = classify_entire_conversation(df, window_size, stride, max_length, ctx=ctx)
     classified_df.to_csv(output_csv, index=False, encoding="utf-8")
     print(f"Predicciones guardadas en: {output_csv}")
 
 
-def fitCSVConversations(input_folder, output_folder, window_size, stride, max_length):
+def fitCSVConversations(
+    input_folder,
+    output_folder,
+    window_size,
+    stride,
+    max_length,
+    model_dir: Optional[str] = None,
+    time_priors_json: Optional[str] = None,
+):
     """
     Batch orchestrator: processes all CSVs in input_folder and writes
     classified CSVs to output_folder.  Isolates broken transcripts on error.
+
+    Args:
+        model_dir        : ruta local al directorio del modelo de segmentación.
+                           Si None, se usa TEXT_MODEL_DIR del entorno.
+        time_priors_json : ruta local al JSON de time priors.
+                           Si None, se usa TIME_PRIORS_JSON del entorno.
     """
     print(f"CALIFICANDO {input_folder}")
     os.makedirs(output_folder, exist_ok=True)
+
+    # Resolver contexto del modelo (cacheado por (model_dir, time_priors_json))
+    model_ctx = get_or_load_context(model_dir, time_priors_json)
+    logger.info(
+        "[fitCSVConversations] Usando modelo: %s", model_ctx.model_dir
+    )
 
     base_folder     = os.path.abspath(os.path.join(input_folder, os.pardir))
     isolated_folder = os.path.join(base_folder, "isolated")
@@ -578,6 +763,7 @@ def fitCSVConversations(input_folder, output_folder, window_size, stride, max_le
                     window_size=window_size,
                     stride=stride,
                     max_length=max_length,
+                    ctx=model_ctx,
                 )
             except Exception as e:
                 print(f"Error processing {filename}: {e}")

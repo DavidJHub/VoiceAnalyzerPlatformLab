@@ -78,11 +78,15 @@ def process_directory_and_average(directory_path, num_windows=10):
     return averaged_results
 
 
-def process_directory_conversations_with_memory(mainDir,rawDir,processedDir,rebuiltDir,keywords_good,keywords_bad):
+def process_directory_conversations_with_memory(
+    mainDir, rawDir, processedDir, rebuiltDir, keywords_good, keywords_bad,
+    model_dir=None, time_priors_json=None,
+):
     dataframes = []
     jsonTranscriptionToCsv(mainDir,rawDir)
     splitConversations(rawDir,rawDir,14)
-    fitCSVConversations(rawDir,processedDir, 14, 6, 32)
+    fitCSVConversations(rawDir, processedDir, 14, 6, 32,
+                        model_dir=model_dir, time_priors_json=time_priors_json)
     getTranscriptParagraphsJsonHighlights(mainDir,keywords_good, keywords_bad)
     jsonDecomposeSentencesHighlight(mainDir + '/transcript_sentences',mainDir + '/transcript_sentences',keywords_good)
     # Process main directory files
@@ -718,7 +722,8 @@ def _enrich_with_compliance_flags(mat: pd.DataFrame,
 
 
 def score_camp(campaign_directory, campaign_id, TMO, topics_combined_df,
-               df_windows: pd.DataFrame = None):
+               df_windows: pd.DataFrame = None,
+               model_dir=None, time_priors_json=None):
     """
     Pipeline principal de calificación de llamadas — modelo MDCL v3.
 
@@ -736,6 +741,12 @@ def score_camp(campaign_directory, campaign_id, TMO, topics_combined_df,
         Salida de audioOutputWpm() con columnas file_name, vols, times,
         overlap_ratio_in_speech, etc. Se usa para calcular silence_ratio y
         overlap en D5. Si es None, D5 sólo usa confidence_score de ASR.
+    model_dir : str, opcional
+        Ruta local al directorio del modelo de segmentación personalizado para
+        este sponsor. Si None se usa TEXT_MODEL_DIR del entorno (modelo global).
+    time_priors_json : str, opcional
+        Ruta local al JSON de time priors del modelo. Si None se usa
+        TIME_PRIORS_JSON del entorno.
 
     Retorna
     -------
@@ -753,6 +764,7 @@ def score_camp(campaign_directory, campaign_id, TMO, topics_combined_df,
     scores = process_directory_conversations_with_memory(
         campaign_directory, routeRawCsvTranscripts,
         routeRawCsvGraded, routeRawCsvRebuilt, PERM, NOPERM,
+        model_dir=model_dir, time_priors_json=time_priors_json,
     )
     print(f"TOTAL DE LLAMADAS A CALIFICAR: {len(scores)}")
 
