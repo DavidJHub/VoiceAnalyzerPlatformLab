@@ -166,13 +166,18 @@ def _get_sponsor_id(conn, sponsor_name: str) -> Optional[int]:
     """
     Busca el sponsor_id en marketing_campaigns cuyo campo sponsor coincida
     (case-insensitive, ignorando espacios extra) con sponsor_name.
+
+    Se ordena por updated_at DESC para tomar el registro activo más reciente,
+    descartando filas con borrado lógico o total que suelen quedar primero si
+    se ordenara por id ASC.
+
     Devuelve None si no se encuentra.
     """
     sql = """
         SELECT id
         FROM   marketing_campaigns
         WHERE  LOWER(REPLACE(sponsor, ' ', '')) = LOWER(REPLACE(%s, ' ', ''))
-        ORDER  BY id ASC
+        ORDER  BY updated_at DESC
         LIMIT  1
     """
     with conn.cursor() as cur:
