@@ -13,6 +13,7 @@ load_dotenv()
 
 import torch
 from auditableSelector.main import classify_audio_quality
+from database.ModelSelector import resolve_model_for_sponsor
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
 from config.logger import logger
@@ -196,6 +197,21 @@ def main(PREFIX,days_ago,mode,oparam1=None):
     id_graf = obtener_o_generar_id_graf(conexion, id_campania_num, id_sponsor)
     print(f"ID DE CAMPAÑA: {camp_id}")
 
+    # ---------------------------------------------------------------
+    # RESOLUCIÓN DEL MODELO DE SEGMENTACIÓN POR SPONSOR
+    # Se consulta vap_models para obtener el modelo personalizado más
+    # reciente (y validado) del sponsor. Si no existe, se usa el modelo
+    # global definido en TEXT_MODEL_DIR / TIME_PRIORS_JSON.
+    # ---------------------------------------------------------------
+    print(f"RESOLVIENDO MODELO DE SEGMENTACIÓN PARA SPONSOR {id_sponsor}...")
+    sponsor_model_dir, sponsor_time_priors = resolve_model_for_sponsor(
+        conexion, int(id_sponsor)
+    )
+    if sponsor_model_dir:
+        print(f"MODELO SELECCIONADO: {sponsor_model_dir}")
+    else:
+        print("USANDO MODELO GLOBAL POR DEFECTO (TEXT_MODEL_DIR)")
+
     # Generar directorio local
 
     processed_output_directory = campaign_directory + "processed/"
@@ -282,7 +298,9 @@ def main(PREFIX,days_ago,mode,oparam1=None):
         os.makedirs(campaign_directory+PREFIX+'_RECONS', exist_ok=True)
     (MAT_CALLS_CAMPAIGN,STATISTICS,MAT_COMPLETE_TOPICS,all_musnt_keywords,
     topics_stats_convs_scores,topics_stats_convs)=score_camp(campaign_directory, PREFIX, TMO,topics_df,
-                                                             df_windows=audioData_vel)
+                                                             df_windows=audioData_vel,
+                                                             model_dir=sponsor_model_dir,
+                                                             time_priors_json=sponsor_time_priors)
 
     AGENTES_DB=config_agents(camp_id)
     AGENTES_DB.to_excel(campaign_directory+"misc/AGENTES_DB.xlsx")
