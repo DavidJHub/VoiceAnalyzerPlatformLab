@@ -284,7 +284,7 @@ def main():
         help="Columna a usar como texto. Default: input_text (fallback a name si no existe)."
     )
     parser.add_argument(
-        "--output_text_dir", type=str, default=None,
+        "--output_text_dir", type=str, default="model_output",
         help="Directorio de salida del modelo. Si no se pasa, se deriva desde campaign_id."
     )
     parser.add_argument(

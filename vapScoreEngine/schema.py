@@ -68,10 +68,10 @@ DIMENSION_WEIGHTS: dict[str, float] = {
 
 CANONICAL_SCRIPT_ORDER: list[str] = [
     "SALUDO",
+    "CONFIRMACION MONITOREO",
     "PERFILAMIENTO",
     "PRODUCTO",
     "CONFORMIDAD",
-    "CONFIRMACION MONITOREO",
     "TRATAMIENTO DATOS",
     "MAC",
     "MAC REFUERZO",          # sólo si aplica
