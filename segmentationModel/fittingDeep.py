@@ -260,19 +260,26 @@ def get_or_load_context(
     Devuelve el ModelContext para la combinación (model_dir, time_priors_json).
 
     Si los parámetros son None se usan las variables de entorno TEXT_MODEL_DIR /
-    TIME_PRIORS_JSON (comportamiento original).  El contexto se cachea en memoria
-    para evitar recargas en el mismo proceso.
+    TIME_PRIORS_JSON (comportamiento original del pipeline antes de modelos por sponsor).
+    Los env vars se re-leen en tiempo de ejecución para no depender del momento
+    de importación del módulo.  El contexto se cachea en memoria para evitar
+    recargas en el mismo proceso.
     """
-    mdir = model_dir      or TEXT_MODEL_DIR
-    tpj  = time_priors_json or TIME_PRIORS_JSON
+    # Re-leer env vars en tiempo de ejecución como fallback.
+    # Esto cubre el caso en que el módulo fue importado antes de que load_dotenv()
+    # cargara los valores (ej. módulo-nivel TEXT_MODEL_DIR podría ser None).
+    mdir = model_dir      or os.getenv("TEXT_MODEL_DIR") or TEXT_MODEL_DIR
+    tpj  = time_priors_json or os.getenv("TIME_PRIORS_JSON") or TIME_PRIORS_JSON
 
     if not mdir:
         raise ValueError(
-            "model_dir no especificado y TEXT_MODEL_DIR no está definida en el entorno."
+            "No se encontró modelo de segmentación. "
+            "Registra el modelo en vap_models o define la variable de entorno TEXT_MODEL_DIR."
         )
     if not tpj:
         raise ValueError(
-            "time_priors_json no especificado y TIME_PRIORS_JSON no está definida en el entorno."
+            "No se encontró time_priors.json. "
+            "Coloca el archivo dentro del directorio del modelo o define TIME_PRIORS_JSON."
         )
 
     cache_key = (mdir, tpj)

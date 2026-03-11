@@ -199,18 +199,33 @@ def main(PREFIX,days_ago,mode,oparam1=None):
 
     # ---------------------------------------------------------------
     # RESOLUCIÓN DEL MODELO DE SEGMENTACIÓN POR SPONSOR
-    # Se consulta vap_models para obtener el modelo personalizado más
-    # reciente (y validado) del sponsor. Si no existe, se usa el modelo
-    # global definido en TEXT_MODEL_DIR / TIME_PRIORS_JSON.
+    # Se consulta vap_models para el modelo personalizado más reciente
+    # (preferiblemente tested=1). Si no hay ninguno registrado o la
+    # descarga falla, se usa el modelo global (TEXT_MODEL_DIR /
+    # TIME_PRIORS_JSON), exactamente igual que antes.
     # ---------------------------------------------------------------
     print(f"RESOLVIENDO MODELO DE SEGMENTACIÓN PARA SPONSOR {id_sponsor}...")
     sponsor_model_dir, sponsor_time_priors = resolve_model_for_sponsor(
         conexion, int(id_sponsor)
     )
-    if sponsor_model_dir:
-        print(f"MODELO SELECCIONADO: {sponsor_model_dir}")
+
+    # Fallback explícito al modelo general si no se obtuvo un modelo por sponsor.
+    # Esto garantiza el comportamiento original cuando vap_models no tiene entrada.
+    _global_model_dir   = os.getenv("TEXT_MODEL_DIR")
+    _global_time_priors = os.getenv("TIME_PRIORS_JSON")
+
+    if not sponsor_model_dir:
+        sponsor_model_dir = _global_model_dir
+        print(f"SIN MODELO PERSONALIZADO. Usando modelo global: {sponsor_model_dir}")
     else:
-        print("USANDO MODELO GLOBAL POR DEFECTO (TEXT_MODEL_DIR)")
+        print(f"MODELO PERSONALIZADO SELECCIONADO: {sponsor_model_dir}")
+
+    # time_priors puede venir como None aunque el modelo exista (no incluido en S3).
+    # En ese caso usar el time_priors.json del modelo global.
+    if not sponsor_time_priors:
+        sponsor_time_priors = _global_time_priors
+        if sponsor_time_priors:
+            print(f"time_priors.json usando variable de entorno: {sponsor_time_priors}")
 
     # Generar directorio local
 
