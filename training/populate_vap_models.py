@@ -173,7 +173,7 @@ def _get_sponsor_id(conn, sponsor_name: str) -> Optional[int]:
     Devuelve None si no se encuentra.
     """
     sql = """
-        SELECT id
+        SELECT sponsor_id
         FROM   marketing_campaigns
         WHERE  LOWER(REPLACE(sponsor, ' ', '')) = LOWER(REPLACE(%s, ' ', ''))
         ORDER  BY id DESC
