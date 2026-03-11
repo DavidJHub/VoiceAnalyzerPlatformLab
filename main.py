@@ -440,7 +440,7 @@ def main(PREFIX,days_ago,mode,oparam1=None):
 
     try:
         if len(STATISTICS[STATISTICS['final_label'] == 'CONFIRMACION DATOS'])>0:
-            indice_confirmacion = STATISTICS[STATISTICS['final_label'] == 'CONFIRMACION DE DATOS']['mean_centroid'].reset_index(drop=True)[0]
+            indice_confirmacion = STATISTICS[STATISTICS['final_label'] == 'CONFIRMACION DATOS']['mean_centroid'].reset_index(drop=True)[0]
         else:
             indice_confirmacion = STATISTICS[STATISTICS['final_label'] == 'TERMINOS LEGALES']['mean_centroid'].reset_index(drop=True)[0]
     except Exception as e:
