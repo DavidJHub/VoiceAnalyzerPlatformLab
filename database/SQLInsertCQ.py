@@ -1,8 +1,7 @@
 from typing import List, Tuple
 import json
 import uuid
-from datetime import date, datetime, timedelta, timezone
-import numpy as np
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 import mysql.connector
 import database.dbConfig as dbcfg
@@ -13,12 +12,6 @@ def _read_sql(conexion: mysql.connector.MySQLConnection,
               sql: str,
               params: Tuple | List = ()) -> pd.DataFrame:
     return pd.read_sql(sql, conexion, params=params)
-
-
-import pandas as pd
-from datetime import datetime
-from typing import Union
-import mysql.connector
 
 def format_datetime(dt_str):
     # Parse the input string into a datetime object

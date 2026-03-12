@@ -1,5 +1,4 @@
 import re
-import boto3
 
 from database.dbConfig import generate_s3_client
 

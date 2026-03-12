@@ -9,7 +9,6 @@ from datetime import timedelta
 from dotenv import load_dotenv
 load_dotenv()
 
-import boto3
 import pandas as pd
 
 import database.dbConfig as dbcfg

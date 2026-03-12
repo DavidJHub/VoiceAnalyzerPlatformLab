@@ -50,14 +50,11 @@ def transcribe_with_retry(ruta_completa, output_file, retry_attempts):
 ################################################################################
 
 import wave
-import json
 import numpy as np
 import librosa
-import scipy.signal
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
-from vosk import Model, KaldiRecognizer
-import time
+from vosk import KaldiRecognizer
 import soundfile as sf
 
 

@@ -7,7 +7,7 @@ import pandas as pd
 
 from audio.ConcatCalls import concatenate_audios_main
 from setup.MemorySetup import download_memory_json
-from database.S3Loader import renombrar_archivos_s3, download_audio_files_fixed_route,download_transcripts_files_fixed_route
+from database.S3Loader import renombrar_archivos_s3, download_audio_files_fixed_route
 from utils.VapFunctions import  clean_column_blank_regex, get_campaign_parameters
 
 # Configuraciones iniciales
@@ -49,10 +49,6 @@ def obtener_inventario():
         conexion.close()
         cursor.close()
         return df_inventory
-
-        # Cerrar cursor y conexión
-        cursor.close()
-        conexion.close()
     else:
         return pd.DataFrame()
 

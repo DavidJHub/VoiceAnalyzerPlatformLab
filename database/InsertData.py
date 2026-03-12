@@ -8,14 +8,11 @@ from database.SQLDataManager import force_array, insertar_datos_campanias_kpis, 
     obtener_charts_recientes_sponsor, obtener_datos_ultima_campania, insertar_datos_sponsor_kpis, obtener_ultimo_id_graf, \
     actualizar_datos_graf, insertar_datos_graf, insertar_datos_flags, insertar_datos_agentes_kpi, \
     insertar_datos_statistics, insertar_datos_agents, insertar_datos_affected_calls, insertar_datos_vap_report
-from Deprecated.ScoreEngine import smooth_array, process_directory_and_average
 from database.dbConfig import generate_s3_client
 from utils.campaignMetrics import count_local_files
 from utils.VapUtils import get_data_types
 from vapStatus import get_latest_date_folder
 
-import numpy as np
-import pandas as pd
 import ast
 
 def vols_to_numeric_array(v):
@@ -117,8 +114,6 @@ def insertar_campanias(conexion, directory_camp, id_campania_num, all_camps_same
         return 0.0 if a == 0 else (a - b) / a
 
     print(all_camps_same_spons)
-    JSONS_TOT = count_local_files(directory_camp + '/transcript_sentences/', 'json')  # no se usa pero lo dejo
-    KULLBACK_LEIBLER = 0.0
     AUDIO_QUALITY = 1.0
     AUDIO_MINUTES_PROCESSED = n0(AUDIO_MINUTES)
 
@@ -483,8 +478,6 @@ def insertar_filas_dataframe_estadisticas(conexion,id_campania_num, df,df_concat
             now)
         insertar_datos_statistics(conexion, datos_secciones)
 
-import math
-import numpy as np
 
 def sql_float(x, default=None, ndigits=None):
     """
@@ -521,13 +514,6 @@ def insertar_filas_dataframe_agentes(conexion,campaign_directory,id_campania_num
     t_5 = 'CONFIRMACION DATOS'
     t_6 = 'DESPEDIDA'
 
-    saludo_score = statistics[statistics['final_label'] == t_1]['mean_conf'] * 100
-    descripcion_score = statistics[statistics['final_label'] == t_2]['mean_conf'] * 100
-    venta_score = statistics[statistics['final_label'] == t_3]['mean_conf'] * 100
-    mac_score = statistics[statistics['final_label'] == t_4]['mean_conf'] * 100
-    confirmacion_score = statistics[statistics['final_label'] == t_5]['mean_conf'] * 100
-    despedida_score = statistics[statistics['final_label'] == t_6]['mean_conf'] * 100
-    
     for index, row in MAT_DATAFRAME.iterrows():
         average_score = sql_float(row.get("score"), default=None, ndigits=1)
         purchase_acceptance = sql_float(np.round(row.get("best_mac_likelihood_macs")*100, 0), default=None, ndigits=1)
@@ -841,8 +827,6 @@ def insertar_fila_reporte(conexion, prefix, fcounter, campaign_parameters, REJEC
         al_mute_count       = 0
 
     
-    folder_date = get_latest_date_folder(s3_url, s3_client)
-
     folder_date = get_latest_date_folder(s3_url, s3_client)
 
     # --- NEW: get concat / recovered from DB under (campaign_id, [sponsor], folder_date) ---

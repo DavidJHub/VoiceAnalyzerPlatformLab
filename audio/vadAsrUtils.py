@@ -1,8 +1,6 @@
 import numpy as np
 import pyloudnorm as pyln
 from pedalboard import Pedalboard, HighpassFilter, LowpassFilter, NoiseGate, Compressor, Limiter, Gain
-import scipy.signal as sps
-import soundfile as sf
 
 
 def align_mask_to_length(mask: np.ndarray, target_len: int, threshold: float = 0.5) -> np.ndarray:

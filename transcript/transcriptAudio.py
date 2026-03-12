@@ -1,4 +1,4 @@
-import json, os
+import json
 try:
     from deepgram import DeepgramClient, PrerecordedOptions  
 except ImportError:

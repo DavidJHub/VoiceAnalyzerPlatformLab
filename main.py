@@ -5,7 +5,6 @@ import sys
 from dotenv import load_dotenv
 
 from audio.audioPrepDeep import main_process_batch,audioOutputWpm
-from audio.audioShazam import merge_peaks, ncc_fft
 from auditableSelector.affectedClassifier import combinedRejectionReason
 import shutil
 
@@ -22,7 +21,7 @@ import pandas as pd
 
 import database.dbConfig as dbcfg
 from database.InsertData import insertar_campanias, insertar_fila_reporte, insertar_sponsors, insertar_grafica, insertar_filas_dataframe_agente_score, \
-    insertar_filas_dataframe_estadisticas, insertar_filas_dataframe_agentes, insertar_filas_dataframe_afectadas
+    insertar_filas_dataframe_agentes, insertar_filas_dataframe_afectadas
 from setup.MatrixSetup import matrix_setup
 from database.S3Loader import cargar_archivos_json_a_s3, cargar_audios_concat_a_s3, cargar_excel_a_s3
 from database.SQLDataManager import config_agents, getAgentStats, obtener_id_sponsor, obtener_o_generar_id_graf, \
@@ -344,7 +343,7 @@ def main(PREFIX,days_ago,mode,oparam1=None):
 
 
     def consent_evaluation(MAT_CALLS_CAMPAIGN,do_it: bool = False):
-        global consent_evaluation_security_variable, promedio_vc
+        global promedio_vc
         promedio_vc = 0.0
         if do_it:
             from consent_evaluator.consent_evaluator import process_transcripts_consent_evaluator

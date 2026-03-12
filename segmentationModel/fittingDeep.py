@@ -4,7 +4,7 @@ import re
 import json
 import shutil
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, Optional, Callable, Tuple
 
 import numpy as np

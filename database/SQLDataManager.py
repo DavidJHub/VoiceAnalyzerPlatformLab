@@ -8,7 +8,6 @@ from datetime import datetime, timedelta, date
 import numpy as np
 import pandas as pd
 
-from mysql.connector import connect, Error
 import database.dbConfig as dbcfg
 
 def make_sql_safe(value):
@@ -68,7 +67,6 @@ def obtener_id_sponsor(conexion, sponsor_name):
         print(f"Error al obtener el id del sponsor: {error}")
         return None
 
-from mysql.connector import connect, Error
 
 def retrieve_agents_db(id_camp):
     query = f"""
