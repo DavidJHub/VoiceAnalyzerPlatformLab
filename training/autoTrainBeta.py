@@ -225,7 +225,7 @@ def load_example_from_xlsx(path: str) -> str:
     if not os.path.exists(path):
         raise FileNotFoundError(f"No se encontró el archivo de ejemplo: {path}")
 
-    df = pd.read_excel(path)
+    df = pd.read_excel(path, engine="openpyxl")
     cols = _norm_cols(df)
 
     if "name" in cols:
@@ -268,7 +268,7 @@ def load_matrix_from_xlsx(path: str) -> pd.DataFrame:
     if not os.path.exists(path):
         raise FileNotFoundError(f"No se encontró la matriz de guion: {path}")
 
-    df = pd.read_excel(path)
+    df = pd.read_excel(path, engine="openpyxl")
     cols = _norm_cols(df)
 
     if "name" in cols:
@@ -752,11 +752,14 @@ def _looks_preprocessed_xlsx(path: str) -> bool:
     Heurística: si las primeras 3 cols incluyen indice/texto/tiempo.
     """
     try:
-        df = pd.read_excel(path, nrows=5)
+        df = pd.read_excel(path, nrows=5, engine="openpyxl")
         cols = [str(c).strip().lower() for c in df.columns[:3]]
         return cols == ["indice", "texto", "tiempo"]
     except Exception:
         return False
+
+_SEGFAULT_CODES = {3221225477, -11, 139}  # 0xC0000005 (Windows), SIGSEGV (Linux)
+
 
 def preprocess_xlsx_local(
     local_raw_xlsx: str,
@@ -767,6 +770,9 @@ def preprocess_xlsx_local(
     Aplica el preprocesamiento local:
     raw.xlsx -> raw_preproc.xlsx
     Devuelve la ruta del preproc.
+
+    Si el subprocess falla con segfault (access violation), reintenta
+    automáticamente con --no_presidio para evitar el crash en spaCy/Presidio.
     """
     preproc_path = _derive_preproc_path(local_raw_xlsx)
 
@@ -787,6 +793,16 @@ def preprocess_xlsx_local(
 
     print(f"  -> [PREPROC] ejecutando: {' '.join(cmd)}")
     r = subprocess.run(cmd, capture_output=True, text=True)
+
+    # Si falla con segfault, reintentar sin Presidio (causa común del crash)
+    if r.returncode != 0 and (r.returncode in _SEGFAULT_CODES or abs(r.returncode) in _SEGFAULT_CODES):
+        extra_args = list(preproc_extra_args or [])
+        if "--no_presidio" not in extra_args:
+            print(f"  -> [PREPROC][RETRY] Segfault detectado (code={r.returncode}). Reintentando con --no_presidio...")
+            extra_args.append("--no_presidio")
+            cmd_retry = [sys.executable, preproc_script, "--input", local_raw_xlsx] + extra_args
+            print(f"  -> [PREPROC] ejecutando: {' '.join(cmd_retry)}")
+            r = subprocess.run(cmd_retry, capture_output=True, text=True)
 
     if r.returncode != 0:
         print("[PREPROC][STDOUT]\n", r.stdout)
@@ -971,7 +987,7 @@ def run_for_sponsor(
 
             print(f"[PROCESS {file_idx}/{len(xlsx_keys)}] (preproc) {local_xlsx_preproc}")
 
-            df_input = pd.read_excel(local_xlsx_preproc)
+            df_input = pd.read_excel(local_xlsx_preproc, engine="openpyxl")
             df_input = df_input.iloc[:, :3]
             calls = split_calls_by_index_reset(df_input)
             print(f"  -> Encontradas {len(calls)} llamadas en este archivo (preproc)")
