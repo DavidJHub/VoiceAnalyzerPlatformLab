@@ -51,15 +51,73 @@ MASK_STATS = {
     "presidio_calls_failed": 0,
 }
 
-def _spacy_model_available(model_name: str = "es_core_news_md") -> bool:
+_PRESIDIO_HEALTH_CHECKED = False
+_PRESIDIO_HEALTH_OK = False
+
+
+def _presidio_health_check() -> bool:
     """
-    Verifica si el modelo spaCy está instalado sin cargarlo (evita segfault).
+    Testea Presidio + spaCy en un subprocess aislado.
+    Si hay segfault (crash de extensiones C / ABI mismatch con numpy),
+    el subprocess muere pero el proceso principal sobrevive.
+    Solo se ejecuta una vez; cachea el resultado.
     """
+    global _PRESIDIO_HEALTH_CHECKED, _PRESIDIO_HEALTH_OK
+
+    if _PRESIDIO_HEALTH_CHECKED:
+        return _PRESIDIO_HEALTH_OK
+
+    _PRESIDIO_HEALTH_CHECKED = True
+
+    test_code = (
+        "import sys\n"
+        "try:\n"
+        "    import spacy\n"
+        "    nlp = spacy.load('es_core_news_md')\n"
+        "    from presidio_analyzer import AnalyzerEngine\n"
+        "    from presidio_analyzer.nlp_engine import NlpEngineProvider\n"
+        "    from presidio_anonymizer import AnonymizerEngine\n"
+        "    provider = NlpEngineProvider(nlp_configuration={\n"
+        "        'nlp_engine_name': 'spacy',\n"
+        "        'models': [{'lang_code': 'es', 'model_name': 'es_core_news_md'}],\n"
+        "    })\n"
+        "    engine = provider.create_engine()\n"
+        "    analyzer = AnalyzerEngine(nlp_engine=engine, supported_languages=['es'])\n"
+        "    results = analyzer.analyze(text='prueba 123', language='es', entities=['PHONE_NUMBER'])\n"
+        "    print('PRESIDIO_OK')\n"
+        "    sys.exit(0)\n"
+        "except Exception as e:\n"
+        "    print(f'PRESIDIO_FAIL:{e}')\n"
+        "    sys.exit(1)\n"
+    )
+
+    import subprocess as _sp
     try:
-        import importlib.util
-        spec = importlib.util.find_spec(model_name.replace("-", "_"))
-        return spec is not None
-    except Exception:
+        print("[PRESIDIO] Ejecutando health check en subprocess aislado...", flush=True)
+        r = _sp.run(
+            [sys.executable, "-c", test_code],
+            capture_output=True, text=True, timeout=120,
+        )
+        if r.returncode == 0 and "PRESIDIO_OK" in r.stdout:
+            print("[PRESIDIO] Health check OK: Presidio + spaCy funcional.", flush=True)
+            _PRESIDIO_HEALTH_OK = True
+            return True
+        else:
+            detail = r.stdout.strip() or r.stderr.strip() or f"code={r.returncode}"
+            print(f"[PRESIDIO][WARN] Health check FALLÓ: {detail}", flush=True)
+            if r.returncode in {3221225477, -11, 139} or abs(r.returncode) in {11, 139}:
+                print("[PRESIDIO][WARN] Segfault detectado (ABI mismatch probable con numpy/spaCy/thinc).", flush=True)
+                print("[PRESIDIO][WARN] Solución: reinstalar extensiones C contra numpy actual:", flush=True)
+                print("    pip install --force-reinstall --no-deps spacy thinc cymem preshed blis", flush=True)
+            _PRESIDIO_HEALTH_OK = False
+            return False
+    except _sp.TimeoutExpired:
+        print("[PRESIDIO][WARN] Health check TIMEOUT (>120s). Desactivando Presidio.", flush=True)
+        _PRESIDIO_HEALTH_OK = False
+        return False
+    except Exception as e:
+        print(f"[PRESIDIO][WARN] Health check error: {e}. Desactivando Presidio.", flush=True)
+        _PRESIDIO_HEALTH_OK = False
         return False
 
 
@@ -67,20 +125,21 @@ def _init_presidio():
     """
     Inicializa Presidio + spaCy solo cuando se necesita.
     Si falla, deja fallback activo (regex).
-    Incluye pre-check del modelo spaCy para evitar segfaults.
+
+    Primero ejecuta health check en subprocess para detectar segfaults
+    (crash por ABI mismatch) sin matar el proceso principal.
     """
     global _PRESIDIO_READY, _analyzer, _anonymizer
 
     if _PRESIDIO_READY:
         return True
 
-    try:
-        # Pre-check: verificar que el modelo spaCy existe antes de intentar cargarlo
-        if not _spacy_model_available("es_core_news_md"):
-            print("[PRESIDIO][WARN] Modelo spaCy 'es_core_news_md' no instalado. Usando fallback regex.", flush=True)
-            _PRESIDIO_READY = False
-            return False
+    # Health check: si Presidio crashea en subprocess, no intentamos en-proceso
+    if not _presidio_health_check():
+        _PRESIDIO_READY = False
+        return False
 
+    try:
         from presidio_analyzer import AnalyzerEngine
         from presidio_analyzer.nlp_engine import NlpEngineProvider
         from presidio_anonymizer import AnonymizerEngine
@@ -94,7 +153,7 @@ def _init_presidio():
         _anonymizer = AnonymizerEngine()
         _PRESIDIO_READY = True
         MASK_STATS["presidio_inits_ok"] += 1
-        print("[PRESIDIO] Inicializado correctamente.", flush=True)
+        print("[PRESIDIO] Inicializado correctamente en proceso principal.", flush=True)
         return True
     except Exception as e:
         print(f"[PRESIDIO][WARN] Fallo al inicializar Presidio: {e}. Usando fallback regex.", flush=True)
@@ -671,7 +730,10 @@ def build_compact(
     encoding: str = "utf-8",
     do_stats: bool = False,
 ):
+    print(f"[STEP 1/5] Leyendo archivo: {input_path}", flush=True)
     df = read_transcript(input_path, sep=sep, encoding=encoding)
+    print(f"[STEP 1/5] OK: {len(df)} filas, columnas={list(df.columns)}", flush=True)
+
     cols_lower = {c.lower(): c for c in df.columns}
     def fix(col):
         return col if col in df.columns else cols_lower.get(col.lower(), col)
@@ -703,11 +765,20 @@ def build_compact(
     # ordenar
     df = df.sort_values([group_col, "_start_sec"], ascending=[True, True], na_position="last").reset_index(drop=True)
 
+    print(f"[STEP 2/5] Datos preparados: {len(df)} filas | mask={do_mask} | presidio={use_presidio}", flush=True)
+
+    # Pre-inicializar Presidio si se va a usar (health check antes de procesar datos)
+    if do_mask and use_presidio:
+        print("[STEP 2/5] Pre-inicializando Presidio (health check)...", flush=True)
+        _init_presidio()
+
     out_rows = []
     per_call_stats = []
 
     # stats globales pre
     total_in_rows = len(df)
+
+    print(f"[STEP 3/5] Procesando {df[group_col].nunique()} grupos...", flush=True)
 
     for gname, dfg in df.groupby(group_col, sort=False):
         dfg = dfg.reset_index(drop=True)
@@ -783,6 +854,7 @@ def build_compact(
 
     df_out = pd.DataFrame(out_rows)
 
+    print(f"[STEP 4/5] Escribiendo output ({len(df_out)} filas)...", flush=True)
     # output path auto
     output_path = derive_output_path(input_path)
     write_output(df_out, output_path, input_path=input_path, sep=sep, encoding=encoding)
