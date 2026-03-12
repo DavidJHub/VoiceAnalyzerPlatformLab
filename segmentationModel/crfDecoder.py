@@ -12,7 +12,7 @@ Dependency:  pip install torchcrf>=1.1.0
 import json
 import numpy as np
 import torch
-from torchCRF import CRF
+from torchcrf import CRF
 
 
 class CRFSequenceDecoder:
