@@ -21,7 +21,7 @@ from segmentationModel.textPostprocessing import reconstruirDialogos, process_di
 from vapScoreEngine.dfUtils import calculate_confidence_scores_per_topic, df_getWordRate, generateConvDataframe
 from vapScoreEngine.schema import (
     CallRecord, DIMENSION_WEIGHTS, REQUIRED_COMPLIANCE_TOPICS,
-    CANONICAL_SCRIPT_ORDER, SCORE_VERSION,
+    SCORE_VERSION,
 )
 
 
@@ -520,7 +520,6 @@ def _build_windows_index(df_windows: pd.DataFrame) -> dict:
     wpm_array   = np.ndarray de WPM por ventana (alineado con times_array).
     vols_array  = np.ndarray de dBFS por ventana (alineado con times_array).
     """
-    import bisect
 
     def _key(fname: str) -> str:
         return os.path.splitext(os.path.basename(str(fname)))[0]
@@ -548,7 +547,6 @@ def _wpm_at_time(index: dict, file_name: str, time_sec) -> float:
     Usa búsqueda binaria sobre el array de tiempos de fin de ventana.
     Retorna NaN si el archivo no está en el índice o el tiempo es inválido.
     """
-    import bisect
 
     if time_sec is None or (isinstance(time_sec, float) and np.isnan(time_sec)):
         return np.nan

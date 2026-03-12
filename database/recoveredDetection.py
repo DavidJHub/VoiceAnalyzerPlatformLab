@@ -1,4 +1,3 @@
-from mysql.connector import connect, Error
 import database.dbConfig as dbcfg
 
 

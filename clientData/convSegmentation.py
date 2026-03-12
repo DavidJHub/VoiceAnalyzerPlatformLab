@@ -29,7 +29,6 @@ import pandas as pd
 from tqdm import tqdm
 
 import database.dbConfig as dbcfg
-from utils.VapUtils import jsonTranscriptionToCsv as _jsonTranscriptionToCsv_external  # por si ya existe, no usamos
 from lang.VapLangUtils import splitConversations
 from segmentationModel.fittingDeep import fitCSVConversations
 from clientData.transcriptScrapper import fetch_agent_audio_rows_last_days

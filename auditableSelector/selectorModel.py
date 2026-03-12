@@ -5,7 +5,6 @@ import altair as alt
 import librosa
 import soundfile as sf
 import tempfile
-import numpy as np
 
 from gmmActivity import (
     extract_activity_regions_with_features,
@@ -14,7 +13,7 @@ from gmmActivity import (
     separate_features_by_activity
 )
 
-from audioMetrics import compute_quality_metrics,compute_quality_features
+from audioMetrics import compute_quality_metrics
 # ------------------------
 # 1) Utility functions
 # ------------------------

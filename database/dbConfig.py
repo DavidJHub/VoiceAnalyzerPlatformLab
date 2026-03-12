@@ -1,11 +1,10 @@
 import logging
 import os
-from sqlite3 import DatabaseError, InterfaceError, OperationalError
 import time
+import random
 import boto3
 from dotenv import load_dotenv
 from mysql.connector import connect, Error as MySQLError
-import random, logging, time
 
 load_dotenv()
 

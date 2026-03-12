@@ -2,19 +2,14 @@ from __future__ import annotations
 
 import os
 import json
+import glob
+import ast
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from tqdm import tqdm
-import ast
-
-
-import glob
-import json
-import os
 from difflib import SequenceMatcher
-from sklearn.preprocessing import QuantileTransformer
 
 import pandas as pd
+import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from tqdm import tqdm
 from segmentationModel.fittingDeep import fitCSVConversations
@@ -23,11 +18,8 @@ from lang.VapLangUtils import normalize_text, get_kws, word_count, \
     correctCommonTranscriptionMistakes, splitConversations
 
 from setup.MatrixSetup import remove_connectors
-from utils.VapFunctions import measureDbAplitude, measure_speed_classification
+from utils.VapFunctions import measure_speed_classification
 from utils.VapUtils import jsonDecompose, get_data_from_name, jsonDecomposeSentencesHighlight, jsonTranscriptionToCsv, getTranscriptParagraphsJson
-
-import pandas as pd
-import numpy as np
 
 from segmentationModel.textPostprocessing import reconstruirDialogos, process_directory_mac_price_def
 from vapScoreEngine.dfUtils import calculate_confidence_scores_per_topic, df_getWordRate, generateConvDataframe

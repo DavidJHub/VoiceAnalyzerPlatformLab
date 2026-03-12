@@ -7,7 +7,6 @@ import spacy
 from nltk.stem import SnowballStemmer
 import numpy as np
 import re
-from line_profiler import LineProfiler
 
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
