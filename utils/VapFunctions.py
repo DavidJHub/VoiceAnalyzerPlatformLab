@@ -219,6 +219,26 @@ def measure_speed_classification(average_speed):
     return speed_classification
 
 
+def measure_volume_classification(normalized_volume):
+    """
+    Clasifica el volumen normalizado (0-1) en low / mid / high.
+    El valor de entrada ya está normalizado desde dBFS (-80..0) → (0..1).
+
+    Umbrales:
+        < 0.25  → 'low'   (equivale a < -60 dBFS aprox., muy bajo)
+        0.25-0.6 → 'mid'  (rango normal de conversación)
+        >= 0.6  → 'high'  (volumen alto)
+    """
+    if normalized_volume is None:
+        return None
+    if normalized_volume < 0.25:
+        return 'low'
+    elif normalized_volume < 0.6:
+        return 'mid'
+    else:
+        return 'high'
+
+
 def kl_div(audio_path1, audio_path2, sr=8000):
     """
     Calculate the Kullback-Leibler divergence between two audio files' frequency distributions.

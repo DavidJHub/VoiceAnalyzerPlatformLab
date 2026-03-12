@@ -12,7 +12,7 @@ from lang.VapLangUtils import normalize_text, get_kws, word_count, \
     correctCommonTranscriptionMistakes, splitConversations
 
 from setup.MatrixSetup import remove_connectors
-from utils.VapFunctions import measure_speed_classification
+from utils.VapFunctions import measure_speed_classification, measure_volume_classification
 from utils.VapUtils import jsonDecompose, get_data_from_name, jsonDecomposeSentencesHighlight, jsonTranscriptionToCsv, getTranscriptParagraphsJsonHighlights
 
 import numpy as np
@@ -564,6 +564,39 @@ def _wpm_at_time(index: dict, file_name: str, time_sec) -> float:
     return float(w_arr[idx])
 
 
+def _normalize_db(db_val: float) -> float:
+    """
+    Normaliza un valor dBFS al rango [0, 1].
+    Mapea el rango típico de dBFS (−80 a 0) a (0 a 1).
+    Valores fuera del rango se clampean.
+    """
+    if db_val is None or (isinstance(db_val, float) and np.isnan(db_val)):
+        return np.nan
+    DB_MIN = -80.0
+    DB_MAX = 0.0
+    normalized = (db_val - DB_MIN) / (DB_MAX - DB_MIN)
+    return float(np.clip(normalized, 0.0, 1.0))
+
+
+def _vol_at_time(index: dict, file_name: str, time_sec) -> float:
+    """
+    Devuelve el volumen normalizado (0-1) de la ventana que contiene
+    `time_sec` para `file_name`.
+    Usa búsqueda binaria sobre el array de tiempos de fin de ventana.
+    Retorna NaN si el archivo no está en el índice o el tiempo es inválido.
+    """
+    if time_sec is None or (isinstance(time_sec, float) and np.isnan(time_sec)):
+        return np.nan
+    key = os.path.splitext(os.path.basename(str(file_name)))[0]
+    if key not in index:
+        return np.nan
+    t_arr, _, v_arr = index[key]
+    idx = int(np.searchsorted(t_arr, float(time_sec), side='left'))
+    if idx >= len(v_arr):
+        idx = len(v_arr) - 1
+    return _normalize_db(float(v_arr[idx]))
+
+
 def _enrich_with_topic_velocity(mat: pd.DataFrame,
                                  df_windows: pd.DataFrame) -> pd.DataFrame:
     """
@@ -578,13 +611,19 @@ def _enrich_with_topic_velocity(mat: pd.DataFrame,
 
     Columnas que se agregan
     -----------------------
-    wpm_at_mac                 : WPM del agente en la ventana donde se dijo el MAC
-    wpm_at_price               : WPM del agente en la ventana donde se dijo el PRECIO
+    wpm_at_mac                     : WPM del agente en la ventana donde se dijo el MAC
+    wpm_at_price                   : WPM del agente en la ventana donde se dijo el PRECIO
     velocity_classification_macs   : categoría de velocidad MAC  ("low"/"normal"/"high")
     velocity_classification_prices : categoría de velocidad PRECIO ("low"/"normal"/"high")
+    vol_at_mac                     : volumen normalizado (0-1) en la ventana del MAC
+    vol_at_price                   : volumen normalizado (0-1) en la ventana del PRECIO
+    volume_classification_mac      : categoría de volumen MAC  ("low"/"mid"/"high")
+    volume_classification_prices   : categoría de volumen PRECIO ("low"/"mid"/"high")
     """
     vel_cols = ('wpm_at_mac', 'wpm_at_price',
-                'velocity_classification_macs', 'velocity_classification_prices')
+                'velocity_classification_macs', 'velocity_classification_prices',
+                'vol_at_mac', 'vol_at_price',
+                'volume_classification_mac', 'volume_classification_prices')
 
     if df_windows is None or df_windows.empty:
         for col in vel_cols:
@@ -605,6 +644,19 @@ def _enrich_with_topic_velocity(mat: pd.DataFrame,
     )
     mat['velocity_classification_prices'] = mat['wpm_at_price'].apply(
         lambda x: measure_speed_classification(x) if pd.notna(x) else None
+    )
+
+    mat['vol_at_mac'] = mat.apply(
+        lambda r: _vol_at_time(index, r['file_name'], r.get('time_centroid_macs')), axis=1
+    )
+    mat['vol_at_price'] = mat.apply(
+        lambda r: _vol_at_time(index, r['file_name'], r.get('time_centroid_prices')), axis=1
+    )
+    mat['volume_classification_mac'] = mat['vol_at_mac'].apply(
+        lambda x: measure_volume_classification(x) if pd.notna(x) else None
+    )
+    mat['volume_classification_prices'] = mat['vol_at_price'].apply(
+        lambda x: measure_volume_classification(x) if pd.notna(x) else None
     )
     return mat
 
