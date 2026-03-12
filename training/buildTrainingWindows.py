@@ -2,9 +2,11 @@
 # -*- coding: utf-8 -*-
 
 import os
+import sys
 import re
 import math
 import argparse
+import traceback
 import pandas as pd
 from datetime import datetime
 
@@ -49,10 +51,23 @@ MASK_STATS = {
     "presidio_calls_failed": 0,
 }
 
+def _spacy_model_available(model_name: str = "es_core_news_md") -> bool:
+    """
+    Verifica si el modelo spaCy está instalado sin cargarlo (evita segfault).
+    """
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec(model_name.replace("-", "_"))
+        return spec is not None
+    except Exception:
+        return False
+
+
 def _init_presidio():
     """
     Inicializa Presidio + spaCy solo cuando se necesita.
     Si falla, deja fallback activo (regex).
+    Incluye pre-check del modelo spaCy para evitar segfaults.
     """
     global _PRESIDIO_READY, _analyzer, _anonymizer
 
@@ -60,6 +75,12 @@ def _init_presidio():
         return True
 
     try:
+        # Pre-check: verificar que el modelo spaCy existe antes de intentar cargarlo
+        if not _spacy_model_available("es_core_news_md"):
+            print("[PRESIDIO][WARN] Modelo spaCy 'es_core_news_md' no instalado. Usando fallback regex.", flush=True)
+            _PRESIDIO_READY = False
+            return False
+
         from presidio_analyzer import AnalyzerEngine
         from presidio_analyzer.nlp_engine import NlpEngineProvider
         from presidio_anonymizer import AnonymizerEngine
@@ -73,8 +94,10 @@ def _init_presidio():
         _anonymizer = AnonymizerEngine()
         _PRESIDIO_READY = True
         MASK_STATS["presidio_inits_ok"] += 1
+        print("[PRESIDIO] Inicializado correctamente.", flush=True)
         return True
-    except Exception:
+    except Exception as e:
+        print(f"[PRESIDIO][WARN] Fallo al inicializar Presidio: {e}. Usando fallback regex.", flush=True)
         _PRESIDIO_READY = False
         return False
 
@@ -223,7 +246,7 @@ def read_transcript(path, sep=None, encoding="utf-8"):
     ext = os.path.splitext(path)[1].lower()
 
     if ext in [".xlsx", ".xls"]:
-        return pd.read_excel(path, dtype=str)
+        return pd.read_excel(path, dtype=str, engine="openpyxl")
 
     if sep is not None:
         return pd.read_csv(path, sep=sep, encoding=encoding, dtype=str)
@@ -280,7 +303,7 @@ def write_output(df_out: pd.DataFrame, output_path: str, input_path: str, sep: s
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
     if ext in [".xlsx", ".xls"]:
-        df_out.to_excel(output_path, index=False)
+        df_out.to_excel(output_path, index=False, engine="openpyxl")
         return
 
     if ext == ".tsv":
@@ -706,7 +729,7 @@ def build_compact(
             max_words=20,               
             merge_fillers=merge_fillers
         )
-        print(f"[DEBUG] {gname}: compact_units_bounded done. Rows in={in_rows} | out={len(dfg3)}")
+        print(f"[DEBUG] {gname}: compact_units_bounded done. Rows in={in_rows} | out={len(dfg3)}", flush=True)
         # limpiar vacíos
         try:
             dfg3["_text_norm"] = dfg3["_text_norm"].apply(normalize_text)
@@ -743,7 +766,7 @@ def build_compact(
                         "unit_end": row["_end_sec"] if not (isinstance(row["_end_sec"], float) and math.isnan(row["_end_sec"])) else "",
                     })
         except Exception as e:
-            print(f"[ERROR] Procesando grupo '{gname}': {e}")
+            print(f"[ERROR] Procesando grupo '{gname}': {e}", flush=True)
             continue
 
         # per-call stats
@@ -764,8 +787,8 @@ def build_compact(
     output_path = derive_output_path(input_path)
     write_output(df_out, output_path, input_path=input_path, sep=sep, encoding=encoding)
 
-    print(f"[OK] Output generado: {output_path}")
-    print(f"[INFO] Filas salida: {len(df_out)} | mask={do_mask} | presidio={use_presidio} | merge_fillers={merge_fillers}")
+    print(f"[OK] Output generado: {output_path}", flush=True)
+    print(f"[INFO] Filas salida: {len(df_out)} | mask={do_mask} | presidio={use_presidio} | merge_fillers={merge_fillers}", flush=True)
 
     # stats a excel "stats.xlsx" en mismo dir
     if do_stats:
@@ -790,7 +813,7 @@ def build_compact(
         }
 
         save_stats_excel(stats_path, summary, per_call_stats)
-        print(f"[OK] Stats guardados en: {stats_path}")
+        print(f"[OK] Stats guardados en: {stats_path}", flush=True)
 
     return output_path
 
@@ -822,22 +845,29 @@ if __name__ == "__main__":
     p.add_argument("--encoding", default="utf-8")
     args = p.parse_args()
 
-    build_compact(
-        input_path=args.input,
-        text_col=args.text_col,
-        time_col=args.time_col,
-        end_col=args.end_col,
-        speaker_col=args.speaker_col,
-        group_col=args.group_col,
-        min_words=args.min_words,
-        max_gap_short_merge=args.max_gap_short_merge,
-        max_gap_same_speaker=args.max_gap_same_speaker,
-        max_unit_words=args.max_unit_words,
-        max_units_per_call=args.max_units_per_call,
-        do_mask=(not args.no_mask),
-        use_presidio=(not args.no_presidio),
-        merge_fillers=(not args.no_merge_fillers),
-        sep=args.sep,
-        encoding=args.encoding,
-        do_stats=args.stats,
-    )
+    try:
+        print(f"[PREPROC] Iniciando preprocesamiento: {args.input}", flush=True)
+        build_compact(
+            input_path=args.input,
+            text_col=args.text_col,
+            time_col=args.time_col,
+            end_col=args.end_col,
+            speaker_col=args.speaker_col,
+            group_col=args.group_col,
+            min_words=args.min_words,
+            max_gap_short_merge=args.max_gap_short_merge,
+            max_gap_same_speaker=args.max_gap_same_speaker,
+            max_unit_words=args.max_unit_words,
+            max_units_per_call=args.max_units_per_call,
+            do_mask=(not args.no_mask),
+            use_presidio=(not args.no_presidio),
+            merge_fillers=(not args.no_merge_fillers),
+            sep=args.sep,
+            encoding=args.encoding,
+            do_stats=args.stats,
+        )
+    except Exception as e:
+        print(f"[PREPROC][FATAL] Error en preprocesamiento: {e}", file=sys.stderr, flush=True)
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
+        sys.exit(1)
