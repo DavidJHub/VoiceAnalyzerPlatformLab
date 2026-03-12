@@ -13,6 +13,8 @@ from utils.VapFunctions import  clean_column_blank_regex, get_campaign_parameter
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 def obtener_inventario():
     """
     Obtiene el inventario de campañas desde la base de datos.
@@ -249,7 +251,7 @@ def campaign_setup(path_campania,mapping_camps_expanded,campaign_parameters,days
             print("RENOMBRANDO ARCHIVOS...")
             renombrar_archivos_s3(S3_PATH,'s3iahub.igs',oparam1,tagCleanning(oparam1),days_ago)
             path_campania=tagCleanning(oparam1)
-    campaign_directory = 'process/' + path_campania + '/'
+    campaign_directory = os.path.join(_PROJECT_ROOT, 'process', path_campania) + '/'
     print(campaign_parameters)
 
     if campaign_parameters is not None:        # GENERACION DE DIRECTORIOS EN LOCAL PARA PROCESAMIENTO
@@ -292,7 +294,7 @@ def campaign_setup_manual_route(path_campania,mapping_camps_expanded,campaign_pa
     5. Descarga los archivos de transcripciones para memoria del S3.
     6. Aisla los audios vacíos (menores a 120 KB) en la carpeta "isolated".
     """
-    campaign_directory = 'process/' + path_campania + '/'
+    campaign_directory = os.path.join(_PROJECT_ROOT, 'process', path_campania) + '/'
     logger.info(f"Parámetros de campaña: {campaign_parameters}")
     if campaign_parameters is not None:
         matrix_path = campaign_directory + 'misc/'

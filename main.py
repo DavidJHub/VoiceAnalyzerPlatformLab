@@ -171,7 +171,7 @@ def main(PREFIX,days_ago,mode,oparam1=None):
     
     OPTION_TRANSCRIPT_ENGINE="DEEPGRAM"
 
-    campaign_directory = 'process/'+ PREFIX +'/'
+    campaign_directory = os.path.join(script_dir, 'process', PREFIX) + '/'
     if mode == "write_auto" or mode == "dry_run":
         campaign_parameters,route,audioList = campaign_setup(PREFIX,mapping_camps_expanded,campaign_parameters,days_ago,oparam1)
     if mode == "write_manual":
