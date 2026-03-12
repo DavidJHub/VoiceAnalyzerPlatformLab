@@ -4,6 +4,8 @@ import re
 import sys
 import argparse
 import subprocess
+import tempfile
+import unicodedata
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -11,6 +13,7 @@ from openai import OpenAI
 
 import database.dbConfig as dbcfg
 import training.datasetPrep as dsprep
+
 
 # ============================
 # CONFIG
@@ -56,53 +59,27 @@ def s3_uri(bucket: str, key: str) -> str:
 def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
-import unicodedata
-import re
-
-def _strip_accents(s: str) -> str:
-    s = unicodedata.normalize("NFKD", s)
-    return "".join(c for c in s if not unicodedata.combining(c))
-
-def _collapse_spaces(s: str) -> str:
-    return re.sub(r"\s+", " ", s).strip()
-
-def _normalize_subtag(raw: str, text: str = "") -> str:
+def parse_s3_uri(uri: str):
     """
-    Normaliza variantes típicas y corrige etiquetas NO permitidas a una permitida,
-    para que el pipeline NO se caiga por issues de formato del LLM.
-
-    Regla especial: "CONFIRMACION" -> MONITOREO vs DATOS por heurística simple.
+    s3://bucket/key -> (bucket, key)
     """
-    s = "" if raw is None else str(raw)
-    s = _strip_accents(s).upper()
-    s = s.replace("\t", " ").replace("\n", " ")
-    s = _collapse_spaces(s)
+    if not uri or not str(uri).startswith("s3://"):
+        return None, None
+    no_scheme = uri[5:]
+    parts = no_scheme.split("/", 1)
+    bucket = parts[0]
+    key = parts[1] if len(parts) > 1 else ""
+    return bucket, key
 
-    # Canonicalizaciones conocidas
-    s = s.replace("TRATAMIENTO DE DATOS", "TRATAMIENTO DATOS")
-
-    # Heurística para "CONFIRMACION" (la causa de tu crash)
-    if s in {"CONFIRMACION", "CONFIRMACION.", "CONFIRMACION:"}:
-        t = _strip_accents(str(text or "")).lower()
-
-        # señales de monitoreo/calidad/grabación
-        if any(k in t for k in [
-            "monitore", "monitor", "calidad", "grabada", "grabacion", "grabaremos",
-            "esta llamada sera grabada", "la llamada sera grabada"
-        ]):
-            return "CONFIRMACION MONITOREO"
-
-        # señales de datos
-        if any(k in t for k in [
-            "dato", "datos", "cedula", "documento", "correo", "email", "direccion",
-            "telefono", "celular", "nit", "numero de"
-        ]):
-            return "CONFIRMACION DATOS"
-
-        # default seguro (elige uno; yo recomiendo DATOS)
-        return "CONFIRMACION DATOS"
-
-    return s
+def count_file_lines(path: str) -> int:
+    """
+    Cuenta líneas físicas del archivo. Si no existe, devuelve 0.
+    Incluye encabezado si existe.
+    """
+    if not path or not os.path.exists(path):
+        return 0
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        return sum(1 for _ in f)
 
 def s3_list_keys(s3_client, bucket: str, prefix: str):
     paginator = s3_client.get_paginator("list_objects_v2")
@@ -132,6 +109,53 @@ def s3_key_exists(s3_client, bucket: str, key: str) -> bool:
         if code in ("404", "NoSuchKey", "NotFound"):
             return False
         raise
+
+
+# ============================
+# Normalización texto / subtags
+# ============================
+
+def _strip_accents(s: str) -> str:
+    s = unicodedata.normalize("NFKD", s)
+    return "".join(c for c in s if not unicodedata.combining(c))
+
+def _collapse_spaces(s: str) -> str:
+    return re.sub(r"\s+", " ", s).strip()
+
+def _normalize_subtag(raw: str, text: str = "") -> str:
+    """
+    Normaliza variantes típicas y corrige etiquetas NO permitidas a una permitida,
+    para que el pipeline NO se caiga por issues de formato del LLM.
+
+    Regla especial: "CONFIRMACION" -> MONITOREO vs DATOS por heurística simple.
+    """
+    s = "" if raw is None else str(raw)
+    s = _strip_accents(s).upper()
+    s = s.replace("\t", " ").replace("\n", " ")
+    s = _collapse_spaces(s)
+
+    # Canonicalizaciones conocidas
+    s = s.replace("TRATAMIENTO DE DATOS", "TRATAMIENTO DATOS")
+
+    # Heurística para "CONFIRMACION"
+    if s in {"CONFIRMACION", "CONFIRMACION.", "CONFIRMACION:"}:
+        t = _strip_accents(str(text or "")).lower()
+
+        if any(k in t for k in [
+            "monitore", "monitor", "calidad", "grabada", "grabacion", "grabaremos",
+            "esta llamada sera grabada", "la llamada sera grabada"
+        ]):
+            return "CONFIRMACION MONITOREO"
+
+        if any(k in t for k in [
+            "dato", "datos", "cedula", "documento", "correo", "email", "direccion",
+            "telefono", "celular", "nit", "numero de"
+        ]):
+            return "CONFIRMACION DATOS"
+
+        return "CONFIRMACION DATOS"
+
+    return s
 
 
 # ============================
@@ -165,6 +189,29 @@ def get_sponsor_info(conn, id_sponsor: int):
         raise RuntimeError(f"Sponsor/Country inválidos para sponsor_id={id_sponsor}: {row}")
 
     return sponsor, country
+
+def get_last_checkpoint_path(conn, id_sponsor: int):
+    """
+    Busca path_tsv del último checkpoint registrado para el sponsor.
+    """
+    q = """
+    SELECT path_tsv
+    FROM vap_reentreno
+    WHERE id_sponsor = %s
+    LIMIT 1
+    """
+    with conn.cursor() as cur:
+        cur.execute(q, (id_sponsor,))
+        row = cur.fetchone()
+
+    if not row:
+        return None
+
+    path_tsv = row[0]
+    if not path_tsv:
+        return None
+
+    return str(path_tsv).strip()
 
 
 # ============================
@@ -418,7 +465,6 @@ def build_call_text_for_prompt(call_df):
     return "\n".join(lines)
 
 
-
 # ============================
 # Master TSV + Cache
 # ============================
@@ -520,7 +566,181 @@ def upload_checkpoint(
 
 
 # ============================
-# Preprocesamiento local (NEW)
+# Enriched / recovery helpers
+# ============================
+
+def enrich_and_upload_master(
+    s3_client,
+    bucket: str,
+    raw_prefix: str,
+    master_local: str,
+):
+    """
+    Genera master_enriched.tsv/xlsx a partir de master_local y los sube a rawtraining/.
+    """
+    try:
+        if dsprep is None:
+            raise RuntimeError("No pude importar datasetPrep.")
+
+        if not os.path.exists(master_local):
+            print("[DATASETPREP][WARN] No existe master_local; no se puede enriquecer.")
+            return None, None
+
+        out_dir = os.path.dirname(master_local)
+        out_stem = os.path.splitext(os.path.basename(master_local))[0] + "_enriched"
+
+        enriched_tsv, enriched_xlsx = dsprep.enrich_master_tsv(
+            master_tsv_path=master_local,
+            out_dir=out_dir,
+            out_stem=out_stem,
+            text_col="name",
+            time_col="time",
+            call_id_col="call_id",
+            write_xlsx=True,
+            write_tsv=True,
+        )
+
+        if enriched_tsv and os.path.exists(enriched_tsv):
+            key_tsv = f"{raw_prefix.rstrip('/')}/{os.path.basename(enriched_tsv)}"
+            s3_upload_file(s3_client, enriched_tsv, bucket, key_tsv)
+            print("[DATASETPREP] Enriched TSV subido:", s3_uri(bucket, key_tsv))
+
+        if enriched_xlsx and os.path.exists(enriched_xlsx):
+            key_xlsx = f"{raw_prefix.rstrip('/')}/{os.path.basename(enriched_xlsx)}"
+            s3_upload_file(s3_client, enriched_xlsx, bucket, key_xlsx)
+            print("[DATASETPREP] Enriched XLSX subido:", s3_uri(bucket, key_xlsx))
+
+        print("[DATASETPREP] OK")
+        return enriched_tsv, enriched_xlsx
+
+    except Exception as ee:
+        print(f"[DATASETPREP][WARN] Falló datasetprep. Motivo: {ee}")
+        return None, None
+
+def safe_finalize_and_upload(
+    s3_client,
+    conn,
+    bucket: str,
+    raw_prefix: str,
+    sponsor_dir: str,
+    master_local: str,
+    id_sponsor: int,
+    llamadas_totales: int,
+    reason: str,
+):
+    """
+    Intenta salvar estado:
+      1) subir master
+      2) upsert checkpoint
+      3) generar enriched
+      4) subir enriched
+    No lanza excepción hacia arriba.
+    """
+    try:
+        upload_checkpoint(
+            s3_client=s3_client,
+            conn=conn,
+            bucket=bucket,
+            raw_prefix=raw_prefix,
+            sponsor_dir=sponsor_dir,
+            master_local=master_local,
+            id_sponsor=id_sponsor,
+            llamadas_totales=llamadas_totales,
+            reason=reason,
+            create_empty_master_if_missing=True,
+        )
+    except Exception as e:
+        print(f"[FINALIZE:{reason}][WARN] Falló upload_checkpoint: {e}")
+
+    try:
+        enrich_and_upload_master(
+            s3_client=s3_client,
+            bucket=bucket,
+            raw_prefix=raw_prefix,
+            master_local=master_local,
+        )
+    except Exception as e:
+        print(f"[FINALIZE:{reason}][WARN] Falló enrich_and_upload_master: {e}")
+
+def resolve_existing_rawtraining_tsv(s3_client, bucket: str, raw_prefix: str, sponsor_dir: str):
+    preferred_key = s3_join(raw_prefix, f"master_{sponsor_dir}.tsv")
+    if s3_key_exists(s3_client, bucket, preferred_key):
+        return preferred_key
+
+    keys = list(s3_list_keys(s3_client, bucket, raw_prefix))
+    tsvs = sorted([k for k in keys if k.lower().endswith(".tsv")])
+    return tsvs[0] if tsvs else None
+
+def choose_best_master_source(
+    s3_client,
+    conn,
+    bucket: str,
+    raw_prefix: str,
+    sponsor_dir: str,
+    master_local: str,
+    id_sponsor: int,
+):
+    """
+    Compara:
+      - master local existente
+      - master del rawtraining/ esperado
+      - master del último checkpoint guardado en DB
+    y deja en master_local el que tenga más líneas.
+    """
+    ensure_dir(os.path.dirname(master_local))
+
+    candidates = []
+
+    # 1) local existente
+    if os.path.exists(master_local):
+        local_lines = count_file_lines(master_local)
+        candidates.append(("local_existing", master_local, local_lines))
+        print(f"[RECOVERY] local existing: {master_local} | líneas={local_lines}")
+
+    # 2) rawtraining/master_{sponsor}.tsv o fallback .tsv
+    try:
+        existing_tsv_key = resolve_existing_rawtraining_tsv(s3_client, bucket, raw_prefix, sponsor_dir)
+        if existing_tsv_key:
+            tmp_remote = os.path.join(os.path.dirname(master_local), "__remote_rawtraining_master.tsv")
+            s3_download_file(s3_client, bucket, existing_tsv_key, tmp_remote)
+            lines_remote = count_file_lines(tmp_remote)
+            candidates.append(("remote_rawtraining", tmp_remote, lines_remote))
+            print(f"[RECOVERY] remote rawtraining: {s3_uri(bucket, existing_tsv_key)} | líneas={lines_remote}")
+    except Exception as e:
+        print(f"[RECOVERY][WARN] No pude revisar rawtraining remoto. Motivo: {e}")
+
+    # 3) último checkpoint según DB
+    try:
+        last_checkpoint_uri = get_last_checkpoint_path(conn, id_sponsor)
+        if last_checkpoint_uri:
+            cp_bucket, cp_key = parse_s3_uri(last_checkpoint_uri)
+            if cp_bucket and cp_key:
+                tmp_checkpoint = os.path.join(os.path.dirname(master_local), "__remote_checkpoint_master.tsv")
+                s3_download_file(s3_client, cp_bucket, cp_key, tmp_checkpoint)
+                lines_cp = count_file_lines(tmp_checkpoint)
+                candidates.append(("remote_last_checkpoint", tmp_checkpoint, lines_cp))
+                print(f"[RECOVERY] remote DB checkpoint: {last_checkpoint_uri} | líneas={lines_cp}")
+    except Exception as e:
+        print(f"[RECOVERY][WARN] No pude revisar último checkpoint desde DB. Motivo: {e}")
+
+    if not candidates:
+        print("[RECOVERY] No había master previo local/remoto. Se inicia desde cero.")
+        return master_local
+
+    best_name, best_path, best_lines = max(candidates, key=lambda x: x[2])
+    print(f"[RECOVERY] Mejor fuente: {best_name} | líneas={best_lines}")
+
+    if os.path.abspath(best_path) != os.path.abspath(master_local):
+        ensure_dir(os.path.dirname(master_local))
+        import shutil
+        shutil.copy2(best_path, master_local)
+        print(f"[RECOVERY] Copiado a master_local: {master_local}")
+
+    return master_local
+
+
+# ============================
+# Preprocesamiento local
 # ============================
 
 def _derive_preproc_path(input_xlsx: str) -> str:
@@ -550,13 +770,11 @@ def preprocess_xlsx_local(
     """
     preproc_path = _derive_preproc_path(local_raw_xlsx)
 
-    # Si ya existe y parece preproc, úsalo
     if os.path.exists(preproc_path) and _looks_preprocessed_xlsx(preproc_path):
         print(f"  -> [PREPROC] ya existe: {preproc_path}")
         return preproc_path
 
     if _looks_preprocessed_xlsx(local_raw_xlsx):
-        # Si por error ya te bajaron preproc, lo aceptamos
         print(f"  -> [PREPROC] input ya está preprocesado: {local_raw_xlsx}")
         return local_raw_xlsx
 
@@ -576,27 +794,12 @@ def preprocess_xlsx_local(
         raise RuntimeError(f"Preprocesamiento falló (code={r.returncode}) para {local_raw_xlsx}")
 
     if not os.path.exists(preproc_path):
-        # si tu script escribe a otra ruta, esto te lo detecta de inmediato
         print("[PREPROC][STDOUT]\n", r.stdout)
         print("[PREPROC][STDERR]\n", r.stderr)
-        raise RuntimeError(f"Preproc terminó pero NO encontré output esperado: {preproc_path}")
+        raise RuntimeError(f"Preproc terminó pero NO se encontró output esperado: {preproc_path}")
 
     print(f"  -> [PREPROC] OK: {preproc_path}")
     return preproc_path
-
-
-# ============================
-# Resolver TSV existente en rawtraining/
-# ============================
-
-def resolve_existing_rawtraining_tsv(s3_client, bucket: str, raw_prefix: str, sponsor_dir: str):
-    preferred_key = s3_join(raw_prefix, f"master_{sponsor_dir}.tsv")
-    if s3_key_exists(s3_client, bucket, preferred_key):
-        return preferred_key
-
-    keys = list(s3_list_keys(s3_client, bucket, raw_prefix))
-    tsvs = sorted([k for k in keys if k.lower().endswith(".tsv")])
-    return tsvs[0] if tsvs else None
 
 
 # ============================
@@ -644,7 +847,6 @@ def run_for_sponsor(
     conv_prefix = s3_join(country, sponsor, "conversations") + "/"
     raw_prefix  = s3_join(country, sponsor, "rawtraining") + "/"
 
-    # default preproc_script: preproc.py en el mismo dir que este archivo
     if preproc_script is None:
         here = os.path.dirname(os.path.abspath(__file__))
         preproc_script = os.path.join(here, "buildTrainingWindows.py")
@@ -665,17 +867,18 @@ def run_for_sponsor(
     class_matrix_df  = load_matrix_from_xlsx(matrix_local)
     BASE_PROMPT      = build_base_prompt(tagged_example, class_matrix_df)
 
-    # 2) Resolver TSV existente
-    existing_tsv_key = resolve_existing_rawtraining_tsv(s3_client, bucket, raw_prefix, sponsor_dir)
+    # 2) Resolver / recuperar master más completo
     master_local = os.path.join(local_raw, f"master_{sponsor_dir}.tsv")
-
-    if existing_tsv_key:
-        s3_download_file(s3_client, bucket, existing_tsv_key, master_local)
-        print(f"[INFO] TSV base descargado: {s3_uri(bucket, existing_tsv_key)}")
-        print(f"[INFO] TSV local: {master_local}")
-    else:
-        print("[INFO] No existe TSV en rawtraining/. Se creará uno nuevo localmente cuando llegue la primera llamada.")
-        print(f"[INFO] TSV local (a crear): {master_local}")
+    choose_best_master_source(
+        s3_client=s3_client,
+        conn=conn,
+        bucket=bucket,
+        raw_prefix=raw_prefix,
+        sponsor_dir=sponsor_dir,
+        master_local=master_local,
+        id_sponsor=id_sponsor,
+    )
+    print(f"[INFO] Master de trabajo: {master_local}")
 
     # 3) Listar XLSX en conversations/
     conv_keys = list(s3_list_keys(s3_client, bucket, conv_prefix))
@@ -700,6 +903,7 @@ def run_for_sponsor(
 
         last_err = None
         raw_output = None
+        repair_messages = None
 
         for attempt in range(max_retries + 1):
             resp = client.chat.completions.create(
@@ -711,7 +915,6 @@ def run_for_sponsor(
 
             raw_output = (resp.choices[0].message.content or "").strip()
 
-            # Parse TSV
             tsv_buffer = io.StringIO(raw_output)
             df_labels = pd.read_csv(
                 tsv_buffer,
@@ -722,12 +925,10 @@ def run_for_sponsor(
                 on_bad_lines="warn",
             )
 
-            # Normaliza/corrige
             df_labels["texto"]  = df_labels["texto"].astype(str)
             df_labels["tiempo"] = df_labels["tiempo"].astype(str).str.strip()
             df_labels["subtag"] = df_labels.apply(lambda r: _normalize_subtag(r["subtag"], r["texto"]), axis=1)
 
-            # Validación
             bad = df_labels[~df_labels["subtag"].isin(SUBTAGS_SET)]
             if bad.empty:
                 llamadas_totales += 1
@@ -735,7 +936,6 @@ def run_for_sponsor(
 
             last_err = f"Subtags inválidos: {sorted(bad['subtag'].unique().tolist())}"
 
-            # Construye repair prompt para el siguiente intento
             allowed = ", ".join(SUBTAGS)
             repair_messages = [
                 {"role": "system", "content": "Corrige salidas. No inventes etiquetas."},
@@ -754,8 +954,6 @@ def run_for_sponsor(
 
         raise ValueError(f"GPT devolvió subtags inválidos tras reintentos. Último error: {last_err}")
 
-
-    # 4) Loop principal
     try:
         for file_idx, key in enumerate(xlsx_keys, start=1):
             fname = os.path.basename(key)
@@ -764,7 +962,6 @@ def run_for_sponsor(
             print(f"\n[DOWNLOAD {file_idx}/{len(xlsx_keys)}] {s3_uri(bucket, key)}")
             s3_download_file(s3_client, bucket, key, local_xlsx_raw)
 
-            # --- PREPROCESAR LOCALMENTE ANTES DE ETIQUETAR ---
             print(f"[PREPROC {file_idx}/{len(xlsx_keys)}] {local_xlsx_raw}")
             local_xlsx_preproc = preprocess_xlsx_local(
                 local_raw_xlsx=local_xlsx_raw,
@@ -772,20 +969,19 @@ def run_for_sponsor(
                 preproc_extra_args=preproc_extra_args,
             )
 
-            # --- ETIQUETAR usando el PREPROC ---
             print(f"[PROCESS {file_idx}/{len(xlsx_keys)}] (preproc) {local_xlsx_preproc}")
 
             df_input = pd.read_excel(local_xlsx_preproc)
-            df_input = df_input.iloc[:, :3]  # indice, texto, tiempo
+            df_input = df_input.iloc[:, :3]
             calls = split_calls_by_index_reset(df_input)
             print(f"  -> Encontradas {len(calls)} llamadas en este archivo (preproc)")
 
             processed_master = get_processed_call_ids_from_master(master_local)
-            processed_cache  = load_cache(local_xlsx_preproc)   # cache sobre el PREPROC
+            processed_cache  = load_cache(local_xlsx_preproc)
             already_done = processed_master.union(processed_cache)
 
             for i, call_df in enumerate(calls, start=1):
-                call_id = f"{fname}__call{i}"   # estable por archivo original
+                call_id = f"{fname}__call{i}"
 
                 if call_id in already_done:
                     print(f"    - [SKIP] llamada {i}/{len(calls)} (ya procesada: {call_id})")
@@ -798,7 +994,7 @@ def run_for_sponsor(
 
                     add_info = {
                         "call_id": call_id,
-                        "source_file": fname,           # archivo original
+                        "source_file": fname,
                         "id_sponsor": str(id_sponsor),
                         "sponsor": sponsor,
                         "country": country,
@@ -817,8 +1013,8 @@ def run_for_sponsor(
                     print(f"       -> Continuando con la siguiente llamada...")
                     continue
 
-        # FIN: checkpoint final
-        upload_checkpoint(
+        # Final exitoso
+        safe_finalize_and_upload(
             s3_client=s3_client,
             conn=conn,
             bucket=bucket,
@@ -827,56 +1023,54 @@ def run_for_sponsor(
             master_local=master_local,
             id_sponsor=id_sponsor,
             llamadas_totales=llamadas_totales,
-            reason="FINISH"
+            reason="FINISH",
         )
 
         print("\n[FINISH] Proceso completado.")
         print("llamadas_totales (GPT):", llamadas_totales)
-                # -------------------------
-        # 6) DATASETPREP (enrich del master TSV)
-        # -------------------------
-        try:
-            if dsprep is None:
-                raise RuntimeError("No pude importar datasetprep.")
-
-            out_dir = os.path.dirname(master_local)
-            out_stem = os.path.splitext(os.path.basename(master_local))[0] + "_enriched"  # master_{sponsor}_enriched
-
-            enriched_tsv, enriched_xlsx = dsprep.enrich_master_tsv(
-                master_tsv_path=master_local,
-                out_dir=out_dir,
-                out_stem=out_stem,
-                text_col="name",
-                time_col="time",
-                call_id_col="call_id",
-                write_xlsx=True,
-                write_tsv=True,
-            )
-
-            # subir enriched a S3/rawtraining
-            if enriched_tsv and os.path.exists(enriched_tsv):
-                key_tsv = f"{raw_prefix.rstrip('/')}/{os.path.basename(enriched_tsv)}"
-                s3_upload_file(s3_client, enriched_tsv, bucket, key_tsv)
-                print("[DATASETPREP] Enriched TSV subido:", s3_uri(bucket, key_tsv))
-
-            if enriched_xlsx and os.path.exists(enriched_xlsx):
-                key_xlsx = f"{raw_prefix.rstrip('/')}/{os.path.basename(enriched_xlsx)}"
-                s3_upload_file(s3_client, enriched_xlsx, bucket, key_xlsx)
-                print("[DATASETPREP] Enriched XLSX subido:", s3_uri(bucket, key_xlsx))
-
-            print("[DATASETPREP] OK")
-
-        except Exception as ee:
-            print(f"[DATASETPREP][WARN] Falló datasetprep (master TSV quedó listo). Motivo: {ee}")
-
         return llamadas_totales
-    
-    
+
+    except KeyboardInterrupt:
+        print("\n[INTERRUPT] Proceso cancelado manualmente.")
+        print("llamadas_totales (GPT):", llamadas_totales)
+
+        safe_finalize_and_upload(
+            s3_client=s3_client,
+            conn=conn,
+            bucket=bucket,
+            raw_prefix=raw_prefix,
+            sponsor_dir=sponsor_dir,
+            master_local=master_local,
+            id_sponsor=id_sponsor,
+            llamadas_totales=llamadas_totales,
+            reason="INTERRUPTED",
+        )
+        return llamadas_totales
+
     except Exception as e:
         print(f"\n[EXCEPTION] Ocurrió un error inesperado durante el proceso: {e}")
-        print("\n[STOP] Proceso interrumpido.")
+        print(e)
+        print("[STOP] Proceso interrumpido.")
         print("llamadas_totales (GPT):", llamadas_totales)
+
+        safe_finalize_and_upload(
+            s3_client=s3_client,
+            conn=conn,
+            bucket=bucket,
+            raw_prefix=raw_prefix,
+            sponsor_dir=sponsor_dir,
+            master_local=master_local,
+            id_sponsor=id_sponsor,
+            llamadas_totales=llamadas_totales,
+            reason="FAILED",
+        )
         return llamadas_totales
+
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 # ============================
@@ -889,7 +1083,6 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="gpt-4.1-mini")
     parser.add_argument("--bucket", type=str, default=BUCKET_DEFAULT)
 
-    # NEW: preproc integration
     parser.add_argument(
         "--preproc_script",
         type=str,

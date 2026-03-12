@@ -649,7 +649,6 @@ def build_compact(
     do_stats: bool = False,
 ):
     df = read_transcript(input_path, sep=sep, encoding=encoding)
-
     cols_lower = {c.lower(): c for c in df.columns}
     def fix(col):
         return col if col in df.columns else cols_lower.get(col.lower(), col)
