@@ -718,7 +718,8 @@ def run_for_sponsor(
                 sep="\t",
                 header=None,
                 names=["texto", "subtag", "tiempo"],
-                dtype=str
+                dtype=str,
+                on_bad_lines="warn",
             )
 
             # Normaliza/corrige
@@ -810,23 +811,11 @@ def run_for_sponsor(
                     already_done.add(call_id)
 
                 except Exception as e:
-                    print(f"\n[ERROR] Falló llamada {i}/{len(calls)} en archivo {file_idx}/{len(xlsx_keys)}")
-                    print(f"        call_id={call_id}")
-                    print(f"        motivo={e}")
-
-                    upload_checkpoint(
-                        s3_client=s3_client,
-                        conn=conn,
-                        bucket=bucket,
-                        raw_prefix=raw_prefix,
-                        sponsor_dir=sponsor_dir,
-                        master_local=master_local,
-                        id_sponsor=id_sponsor,
-                        llamadas_totales=llamadas_totales,
-                        reason="FAIL"
-                    )
-                    # cortamos para reintentar luego
-                    return llamadas_totales
+                    print(f"\n[WARN] Falló llamada {i}/{len(calls)} en archivo {file_idx}/{len(xlsx_keys)}")
+                    print(f"       call_id={call_id}")
+                    print(f"       motivo={e}")
+                    print(f"       -> Continuando con la siguiente llamada...")
+                    continue
 
         # FIN: checkpoint final
         upload_checkpoint(
