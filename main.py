@@ -24,6 +24,7 @@ from database.InsertData import insertar_campanias, insertar_fila_reporte, inser
     insertar_filas_dataframe_agentes, insertar_filas_dataframe_afectadas
 from setup.MatrixSetup import matrix_setup
 from database.S3Loader import cargar_archivos_json_a_s3, cargar_audios_concat_a_s3, cargar_excel_a_s3
+from database.CampaignFileUploader import upload_campaign_topics_file
 from database.SQLDataManager import config_agents, getAgentStats, obtener_id_sponsor, obtener_o_generar_id_graf, \
     obtener_charts_recientes_campania, obtener_ultimo_id_graf, calls_this_campaign, merge_with_null_agent, \
     mark_campaign_processed
@@ -550,6 +551,19 @@ def main(PREFIX,days_ago,mode,oparam1=None):
         print("RUTA A SUBIR LOS AUDIOS")
 
         print(route_audios)
+
+        # ---------------------------------------------------------------
+        # SUBIR topics_transcripts_convers.xlsx A S3
+        # ---------------------------------------------------------------
+        print("SUBIENDO ARCHIVO DE TOPICS/TRANSCRIPTS A S3...")
+        upload_result = upload_campaign_topics_file(
+            campaign_directory=campaign_directory,
+            prefix=PREFIX,
+            conn=conexion,
+        )
+        print(f"[UPLOAD TOPICS] status={upload_result['status']} "
+              f"s3={upload_result['s3_uri']} msg={upload_result['message']}")
+
         insertar_filas_dataframe_afectadas(conexion, df_concatenado_afectadas)
         mark_campaign_processed(int(id_campania_num))
         insertar_fila_reporte(conexion, 
