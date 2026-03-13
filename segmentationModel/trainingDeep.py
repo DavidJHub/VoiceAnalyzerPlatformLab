@@ -47,13 +47,25 @@ def get_country_sponsor_by_sponsor_id(conn, sponsor_id: int):
         raise RuntimeError(f"Country/Sponsor inválidos para sponsor_id={sponsor_id}: {row}")
     return str(country), str(sponsor)
 
+def _base_model_short_name(model_name: str) -> str:
+    """Extract a short identifier from a HuggingFace model name for directory naming."""
+    # e.g. "dccuchile/bert-base-spanish-wwm-cased" -> "bert-base-spanish-wwm-cased"
+    short = model_name.split("/")[-1]
+    return sanitize_dirname(short)
+
+
 def build_default_paths_from_campaign(sponsor_id: int):
     """
     Retorna:
       train_file, output_text_dir, output_time_json
     según convención:
       reentreno/{country}/{sponsor}/rawtraining/master_{sponsor}_enriched.tsv
+
+    Model directory is auto-named as:
+      {sponsor_id}_{YYYYMMDD}_{base_model}_textmodel
     """
+    from datetime import datetime
+
     conn = get_db_connection()
     try:
         country, sponsor = get_country_sponsor_by_sponsor_id(conn, sponsor_id)
@@ -66,9 +78,13 @@ def build_default_paths_from_campaign(sponsor_id: int):
     country_dir = sanitize_dirname(country)
     sponsor_dir = sanitize_dirname(sponsor)
 
+    date_str = datetime.now().strftime("%Y%m%d")
+    base_model_short = _base_model_short_name(MODEL_NAME)
+    model_dirname = f"{sponsor_id}_{date_str}_{base_model_short}_textmodel"
+
     base = os.path.join("reentreno", country_dir, sponsor_dir)
     train_file = os.path.join(base, "rawtraining", f"master_{sponsor_dir}_enriched.tsv")
-    output_text_dir = os.path.join(base, "model", "model_text")
+    output_text_dir = os.path.join(base, "model", model_dirname)
     output_time_json = os.path.join(base, "model", "time_priors_subtag.json")
     return train_file, output_text_dir, output_time_json
 
